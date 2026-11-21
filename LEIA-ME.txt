@@ -1,0 +1,9 @@
+ROBÔ QUEDA COM PROJETO — PAPEL NA NUVEM
+Simulação (não usa carteira nem dinheiro). Roda no GitHub Actions 24 h.
+
+- robo.mjs ...... liga o robô (núcleo igual ao HTML v4.7.1) por ~5h40 e já deixa a próxima rodada na fila
+- nucleo.js ..... a lógica: moedas com 5+ dias e projeto, compra em −30/−45/−60/−70% da máxima de 24 h,
+                  partes 0,03/0,06/0,12/0,19 SOL, alvo +15% sobre o investido, sem stop, saída em 72 h
+- estado.json ... tudo do teste (posições, fechadas, dias, drawdown); salvo a cada 5 min
+- index.html .... painel para acompanhar (abre pelo GitHub Pages, branch "painel")
+Para mudar ajustes: editar "cfg" dentro de estado.json ou pedir uma versão nova.
