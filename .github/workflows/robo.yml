@@ -1,0 +1,26 @@
+name: robo-queda-papel
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # a cada 30 min entra uma rodada na fila; só uma roda por vez
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: robo
+  cancel-in-progress: false
+jobs:
+  rodar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Robô
+        env:
+          TZ: America/Sao_Paulo
+        run: |
+          git config user.name "robo-queda"
+          git config user.email "robo-queda@users.noreply.github.com"
+          node robo.mjs
