@@ -105,6 +105,8 @@ async function cotacao(){
   // reserva: preço do SOL na Jupiter e dólar pela AwesomeAPI
   if (!(SOLUSD > 0)) try { const j = await (await fetch('https://lite-api.jup.ag/price/v3?ids=So11111111111111111111111111111111111111112')).json(); SOLUSD = +j['So11111111111111111111111111111111111111112'].usdPrice || 0; } catch(e){}
   if (!(SOLBRL > 0) && SOLUSD > 0) try { const j = await (await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL')).json(); const usd = +j.USDBRL.bid; if (usd > 0) SOLBRL = SOLUSD * usd; } catch(e){}
+  if (!(SOLBRL > 0) && SOLUSD > 0) try { const j = await (await fetch('https://open.er-api.com/v6/latest/USD')).json(); const usd = +j.rates.BRL; if (usd > 0) SOLBRL = SOLUSD * usd; } catch(e){}
+  if (!(SOLBRL > 0) && SOLUSD > 0) try { const j = await (await fetch('https://api.frankfurter.app/latest?from=USD&to=BRL')).json(); const usd = +j.rates.BRL; if (usd > 0) SOLBRL = SOLUSD * usd; } catch(e){}
   if (SOLBRL > 0 && S.ajustarBanca) { S.cfg.bancaBRL = Math.round(S.solInicial * SOLBRL); delete S.ajustarBanca; salvar(); }
   if (SOLBRL > 0 && S.solInicial == null) { S.solInicial = S.cfg.bancaBRL / SOLBRL; S.saldo = S.solInicial; ev(`Banca: ${fmtR(S.cfg.bancaBRL)} = ${S.solInicial.toFixed(2)} SOL`, COR.info); salvar(); }
 }
