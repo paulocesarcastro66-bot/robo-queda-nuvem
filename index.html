@@ -419,7 +419,7 @@ function desenha(){
         <td class="n">${w.p ? fmtP(w.p) : '—'}${w.p && p.hiRef ? `<br><span class="sub">${((w.p / p.hiRef - 1) * 100).toFixed(0)}% da máx.</span>` : ''}</td>
         <td class="n" style="color:${corDir(pct)}"><b>${pct >= 0 ? '▲ +' : '▼ '}${pct.toFixed(1)}%</b>${SOLBRL ? `<br><b>${sg((p.valor || p.custo) - p.custo)}${fmtR(((p.valor || p.custo) - p.custo) * SOLBRL)}</b>` : ''}<br><span class="sub">${sg((p.valor || p.custo) - p.custo)}${((p.valor || p.custo) - p.custo).toFixed(3)} SOL · alvo +${c.alvo}%</span></td>
         <td>${rec}</td>
-        <td class="n">${hrs.toFixed(1)} h<br><span class="sub">máx ${c.tempoMaxH} h</span></td></tr>`; });
+        <td class="n">${hrs.toFixed(1)} h<br><span class="sub">${p.partes.length >= 4 ? `fecha em ${Math.max(0, c.tempoMaxH - (Date.now() - (p.partes[3].t || p.t0)) / 3600000).toFixed(1)} h` : `sem limite até a 4ª parte`}</span></td></tr>`; });
     h += `</table>`; }
   // ---------------- FECHADAS ----------------
   h += `<div class="sec">✅ OPERAÇÕES FECHADAS — ${H.length} · <span style="color:#93c5fd">acerto ${H.length ? wr.toFixed(0) + '%' : '—'}</span> · <span style="color:${corDir(resFech)}">${sg(resFech)}${resFech.toFixed(3)} SOL${SOLBRL ? ' (' + sg(resFech) + fmtR(resFech * SOLBRL) + ')' : ''}</span></div>`;
