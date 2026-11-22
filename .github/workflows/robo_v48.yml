@@ -1,10 +1,11 @@
 name: robo-queda-papel-v48
 on:
   schedule:
-    - cron: '*/30 * * * *'   # a cada 30 min entra uma rodada na fila; só uma roda por vez
+    - cron: '*/30 * * * *'   # reserva: o agendamento do GitHub atrasa/pula, por isso cada rodada já encomenda a próxima
   workflow_dispatch:
 permissions:
   contents: write
+  actions: write
 concurrency:
   group: robo
   cancel-in-progress: false
@@ -14,6 +15,10 @@ jobs:
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
+      - name: Encomenda a próxima rodada (fica na fila e começa assim que esta terminar)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run robo_v48.yml --ref main --repo ${{ github.repository }} || echo "não deu para encomendar; o agendamento de reserva continua"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
