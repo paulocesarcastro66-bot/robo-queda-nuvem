@@ -2,8 +2,24 @@
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Robô Queda com Projeto — PAPEL — NUVEM</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Robô Queda com Projeto — PAPEL — NUVEM (calendário + simulador)</title>
 <style>
+  #calFundo{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:50;display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:30px 10px}
+  #calCaixa{background:#0b0f17;border:1px solid #1f2937;border-radius:12px;width:min(880px,100%);padding:16px 18px;color:#e5e7eb}
+  .calTop{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+  .calTop button{background:#111827;border:1px solid #374151;color:#e5e7eb;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:14px}
+  .calTot{font-size:26px;font-weight:700;margin:10px 0 6px}
+  .calBarra{height:5px;border-radius:3px;background:#374151;display:flex;overflow:hidden;margin:4px 0}
+  .calGrade{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:10px}
+  .calCab{text-align:center;font-size:12px;color:#9ca3af;font-weight:600;padding:4px 0}
+  .calDia{min-height:76px;border-radius:8px;background:#111827;border:1px solid #1f2937;padding:6px 8px;display:flex;flex-direction:column;justify-content:space-between}
+  .calDia .n{font-size:12px;color:#9ca3af;text-align:left}
+  .calDia .v{font-size:15px;font-weight:700;text-align:center}
+  .calDia .r{font-size:11px;text-align:center;opacity:.85}
+  .calHoje{outline:2px solid #3b82f6}
+  .calAno{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:14px}
+  .calMes{border-radius:8px;background:#111827;border:1px solid #1f2937;padding:6px;text-align:center;cursor:pointer;font-size:12px}
+  .calMes b{display:block;font-size:13px;margin-top:2px}
   html,body{margin:0;background:#0b0f17;color:#e5e7eb;font:14px system-ui}
   #topo{position:sticky;top:0;z-index:3;background:#0b0f17;border-bottom:1px solid #1f2937;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
   button{background:#1f2937;border:1px solid #374151;color:#e5e7eb;border-radius:6px;cursor:pointer;padding:4px 10px;font:12px system-ui}
@@ -30,21 +46,36 @@
   .big{font-size:26px;font-weight:800}
   .card.destaque{border-color:#3b82f6;background:#0f1a33}
   .rec{color:#fcd34d;font-weight:700}
+  #sim{display:flex;flex-wrap:wrap;gap:14px;align-items:center;padding:10px 14px;margin:8px 12px;border:1px solid #3b82f6;border-radius:10px;background:#0f1a33}
+  #sim input{width:90px;margin-left:6px;padding:5px 8px;border-radius:6px;border:1px solid #475569;background:#0b1220;color:#f8fafc;font-size:15px;font-weight:700}
+  #sim label{color:#e2e8f0;font-weight:600}
   #corpo{overflow-x:auto} table.tb{min-width:980px}
 </style>
 </head>
 <body>
 <div id="topo">
-  <div><b>📉 Robô Queda com Projeto — PAPEL — NUVEM</b> <span class="sub">(estilo da carteira BxVqJP · simulação: não usa carteira nem dinheiro)</span><br>
+  <div><b>📉 Robô Queda com Projeto — PAPEL — NUVEM (calendário + simulador)</b> <span class="sub">(estilo da carteira BxVqJP · simulação: não usa carteira nem dinheiro)</span><br>
     <span id="status" class="sub">iniciando…</span></div>
-  <div><button id="bExp">⬇ Exportar JSON</button></div>
+  <div><button id="bCal">📆 Calendário</button> <button id="bExp">⬇ Exportar JSON</button></div>
+</div>
+<div id="sim">
+  <b>🧪 SIMULADOR</b>
+  <label>Banca (SOL) <input id="simBanca" type="number" step="0.1" min="0.1"></label> <span id="simBancaR" class="sub"></span>
+  <label>1ª parte (SOL) <input id="simP1" type="number" step="0.01" min="0.001"></label>
+  <label style="font-weight:600"><input id="simAuto" type="checkbox" style="width:auto;margin:0 4px 0 0"> banca acompanha a margem</label>
+  <span id="simPartes" class="sub"></span>
+  <span class="sub">· simulação só aqui no painel (muda na hora as operações abertas e fechadas, o saldo, a margem, o drawdown e o calendário) — o robô na nuvem continua com os lotes dele</span>
 </div>
 <div id="cfg"></div>
 <div class="cards" id="cards"></div>
 <div id="corpo"></div>
+<div id="calFundo" style="display:none"><div id="calCaixa"></div></div>
 <script>
 // ============================================================================
-// Robô Queda com Projeto — PAPEL v4
+// Robô Queda com Projeto — PAPEL — NUVEM (calendário + simulador)
+// v4.9 = v4.8 + aba 📆 CALENDÁRIO (resultado das operações fechadas por dia, mês e ano, igual ao PNL Calendar do GMGN).
+// v4.8 = v4.7.1 + regra nova de tempo: NÃO fecha por tempo enquanto não comprou as 4 partes;
+//        depois da 4ª parte, fecha se passar tempoMaxH horas (contadas da 4ª parte) sem bater o alvo.
 // Operacional estudado na carteira BxVqJP (Maestro): só moedas antigas e com projeto; compra quando a moeda
 // já caiu forte da máxima de 24 h, faz PREÇO MÉDIO em 3 partes enquanto cai, NÃO usa stop curto, e vende
 // tudo quando o preço médio estiver no lucro (+15%) — segura de horas a dias (máx. 3 dias).
@@ -63,7 +94,7 @@ const PADRAO = {
   parte1: 0.03, parte2: 0.06, parte3: 0.12, parte4: 0.19,   // SOL de cada parte (preço médio crescente)
   alvo: 15,             // vende tudo quando o valor de venda (real) estiver +X% sobre o total investido
   stop: 0,              // 0 = sem stop (como ela). >0 = vende se ficar −X% sobre o investido
-  tempoMaxH: 72,        // vende tudo depois de X horas
+  tempoMaxH: 72,        // v4.8: só depois das 4 partes — vende tudo X horas após a 4ª parte
   liqFuga: 10000,       // se a liquidez cair abaixo de US$ X, vende (sinal de puxada de liquidez)
   maxMoedas: 10,        // moedas abertas ao mesmo tempo
   esperaH: 6,           // depois de fechar uma moeda, espera X horas para entrar nela de novo
@@ -72,7 +103,7 @@ const PADRAO = {
   aluguelSOL: 0.00204,     // conta da moeda: fica presa enquanto a posição está aberta e volta ao vender (fechar conta)
   atrasoExecMs: 1000
 };
-const CHAVE = 'roboQuedaProjetoV471';
+const CHAVE = 'painelNuvemV51';   // só para o painel (o robô roda na nuvem)
 let S = carregar();
 // ---------------- migração: pega o teste mais completo que existir (v4.6 → v4.5 → v4.3/v4.4), refeito com partes mínimas, banca 4,1 SOL, taxa da rede e conta da moeda ----------------
 const BANCA_SOL = 4.1;
@@ -114,16 +145,9 @@ function para46(v){ const T = novo();
 (function migrar(){
   try {
     if (localStorage.getItem(CHAVE)) return;
-    const ler = k => { try { const o = JSON.parse(localStorage.getItem(k) || 'null'); return o && o.solInicial != null ? o : null; } catch(e) { return null; } };
-    const n = o => o ? (o.hist || []).length + Object.keys(o.pos || {}).length : -1;
-    const v46 = ler('roboQuedaProjetoV46'), v45 = ler('roboQuedaProjetoV45'), v43 = ler('roboQuedaProjetoV43');
-    let o = null, de = '';
-    if (v46 && n(v46) >= n(v45) && n(v46) >= n(v43)) { o = v46; de = 'v4.6'; }
-    else if (v45 && n(v45) >= n(v43)) { o = para46(v45); de = 'v4.5'; }
-    else if (v43) { o = para46(para45(v43)); de = 'v4.3/v4.4'; }
-    if (!o) return;
-    o.cfg = Object.assign({}, PADRAO, o.cfg || {});
-    o.eventos = [{ t:Date.now(), txt:`Teste da ${de} trazido para a v4.7.1: ${(o.hist || []).length} fechadas e ${Object.keys(o.pos || {}).length} abertas — drawdown sendo refeito pelas velas de 1 h`, cor:'#3b82f6' }].concat((o.eventos || []).filter(e => !/trazido|continuado|refeito/.test(e.txt))).slice(0, 60);
+    const v = localStorage.getItem('roboQuedaProjetoV50') || localStorage.getItem('roboQuedaProjetoV471'); if (!v) return;
+    const o = JSON.parse(v); o.cfg = Object.assign({}, PADRAO, o.cfg || {});
+    o.eventos = [{ t:Date.now(), txt:'v5.1 (calendário + simulador): cópia do teste da v4.8/v4.9 — aquele teste continua intacto', cor:'#3b82f6' }].concat(o.eventos || []).slice(0, 60);
     localStorage.setItem(CHAVE, JSON.stringify(o)); S = carregar();
   } catch (e) { console.log('migração', e); }
 })();
@@ -144,12 +168,10 @@ const links = m => `<a class="lk" href="https://gmgn.ai/sol/token/${m}" target="
 function bip(f){ try{ const ac=new AudioContext(),o=ac.createOscillator(),g=ac.createGain(); o.frequency.value=f; g.gain.value=0.12; o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime+0.15);}catch(e){} }
 
 async function cotacao(){
-  try { SOLBRL = +(await (await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLBRL')).json()).price || 0; } catch(e){}
-  try { SOLUSD = +(await (await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT')).json()).price || 0; } catch(e){}
-  // reserva: preço do SOL na Jupiter e dólar pela AwesomeAPI
+  try { SOLBRL = +(await (await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLBRL')).json()).price || SOLBRL || 0; } catch(e){}
+  try { SOLUSD = +(await (await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT')).json()).price || SOLUSD || 0; } catch(e){}
   if (!(SOLUSD > 0)) try { const j = await (await fetch('https://lite-api.jup.ag/price/v3?ids=So11111111111111111111111111111111111111112')).json(); SOLUSD = +j['So11111111111111111111111111111111111111112'].usdPrice || 0; } catch(e){}
   if (!(SOLBRL > 0) && SOLUSD > 0) try { const j = await (await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL')).json(); const usd = +j.USDBRL.bid; if (usd > 0) SOLBRL = SOLUSD * usd; } catch(e){}
-  if (!(SOLBRL > 0) && SOLUSD > 0) try { const j = await (await fetch('https://open.er-api.com/v6/latest/USD')).json(); const usd = +j.rates.BRL; if (usd > 0) SOLBRL = SOLUSD * usd; } catch(e){}
   if (SOLBRL > 0 && S.ajustarBanca) { S.cfg.bancaBRL = Math.round(S.solInicial * SOLBRL); delete S.ajustarBanca; salvar(); }
   if (SOLBRL > 0 && S.solInicial == null) { S.solInicial = S.cfg.bancaBRL / SOLBRL; S.saldo = S.solInicial; ev(`Banca: ${fmtR(S.cfg.bancaBRL)} = ${S.solInicial.toFixed(2)} SOL`, COR.info); salvar(); }
 }
@@ -323,7 +345,7 @@ async function conferir(){
         let motivo = '';
         if (p.pct >= c.alvo) motivo = 'alvo';
         else if (c.stop > 0 && p.pct <= -c.stop) motivo = 'stop';
-        else if (h >= c.tempoMaxH) motivo = 'tempo';
+        else if (p.partes.length >= 4 && (Date.now() - (p.partes[3].t || p.t0)) / 3600000 >= c.tempoMaxH) motivo = 'tempo';   // v4.8: só depois da 4ª parte
         else if (w && w.liq && w.liq < c.liqFuga) motivo = 'liquidez sumiu';
         if (motivo) await vender(p, motivo);
       } catch (e) { p.erro = e.message; }
@@ -346,24 +368,34 @@ const doDia = dia => { const H = S.hist.filter(h => new Date(h.t1).toDateString(
 function viraDia(){ const hoje = new Date().toDateString(); if (S.diaAtual === hoje) return; const r = doDia(S.diaAtual);
   S.dias.unshift({ dia:new Date(S.diaAtual).toLocaleDateString('pt-BR'), ...r, brl:SOLBRL ? +(r.res * SOLBRL).toFixed(2) : null }); S.diaAtual = hoje; salvar(); }
 
-// ---------------- laço ----------------
-let ultCot = 0, ultPreco = 0, ultConf = 0, ocupadoLaco = false;
-// ---------------- PAINEL: só mostra o que o robô na nuvem está fazendo (não compra nem vende daqui) ----------------
+// ---------------- PAINEL: lê o robô da nuvem e aplica a simulação daqui ----------------
 const URL_ESTADO = 'https://raw.githubusercontent.com/paulocesarcastro66-bot/robo-queda-nuvem/main/estado.json';
-let atualizadoNuvem = 0, falhaNuvem = '';
+let atualizadoNuvem = 0, falhaNuvem = '', ocupadoLaco = false, lotesNuvem = null, bancaNuvem = null;
+const SIM = (() => { try { return JSON.parse(localStorage.getItem('painelSim') || '{}'); } catch(e) { return {}; } })();
+function guardaSim(){ try { localStorage.setItem('painelSim', JSON.stringify(SIM)); } catch(e) {} }
+function aplicaSim(){
+  S.simAuto = SIM.auto !== false;
+  if (SIM.p1 > 0 && Math.abs(SIM.p1 - S.cfg.parte1) > 1e-9) simP1(SIM.p1);          // já ajusta a banca se "acompanha a margem"
+  else if (S.simAuto && SIM.p1 > 0) bancaAuto();
+  if (!S.simAuto && SIM.banca > 0) simBanca(SIM.banca);
+}
 async function puxarNuvem(){
   try { const r = await fetch(URL_ESTADO + '?t=' + Date.now(), { cache:'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json(); if (!d.estado) throw new Error('sem estado');
     S = d.estado; S.cfg = Object.assign({}, PADRAO, S.cfg || {}); atualizadoNuvem = d.atualizado || 0; falhaNuvem = '';
+    lotesNuvem = [S.cfg.parte1, S.cfg.parte2, S.cfg.parte3, S.cfg.parte4]; bancaNuvem = S.solInicial;
     for (const k of Object.keys(M)) delete M[k]; Object.assign(M, d.vigia || {});
     if (d.cotacao) { if (d.cotacao.SOLBRL > 0) SOLBRL = d.cotacao.SOLBRL; if (d.cotacao.SOLUSD > 0) SOLUSD = d.cotacao.SOLUSD; }
   } catch (e) { falhaNuvem = e.message; } }
 async function cicloPainel(){ if (ocupadoLaco) return; ocupadoLaco = true;
-  try { await puxarNuvem(); if (!(SOLBRL > 0)) { const u = SOLUSD; await cotacao(); if (!(SOLUSD > 0)) SOLUSD = u; } try { await precos(); } catch(e) {} } finally { ocupadoLaco = false; desenha(); marcarNuvem(); } }
+  try { await puxarNuvem(); const b = SOLBRL, u = SOLUSD; await cotacao(); if (!(SOLBRL > 0)) SOLBRL = b; if (!(SOLUSD > 0)) SOLUSD = u;
+    try { await precos(); } catch(e) {}
+    aplicaSim(); }
+  finally { ocupadoLaco = false; desenha(); desenhaCal(); mostraSim(''); marcarNuvem(); } }
 function marcarNuvem(){ const min = atualizadoNuvem ? (Date.now() - atualizadoNuvem) / 60000 : null;
   const cor = min == null ? COR.aviso : min > 20 ? COR.aviso : COR.info;
-  document.getElementById('status').innerHTML = `<span style="color:${cor}">☁ robô na nuvem</span> · estado salvo ${min == null ? '—' : 'há ' + min.toFixed(0) + ' min (' + hora(atualizadoNuvem) + ')'}${min != null && min > 20 ? ' · <b>atrasado</b> (o GitHub pode estar trocando de rodada)' : ''}${falhaNuvem ? ' · falha ao ler: ' + falhaNuvem : ''} · SOL ${SOLBRL ? fmtR(SOLBRL) : '—'} · teste desde ${S.inicio ? hora(S.inicio) : '—'} · página atualiza sozinha a cada 1 min`; }
-cicloPainel(); setInterval(cicloPainel, 60000);
+  document.getElementById('status').innerHTML = `<span style="color:${cor}">☁ robô na nuvem</span> · estado salvo ${min == null ? '—' : 'há ' + min.toFixed(0) + ' min (' + hora(atualizadoNuvem) + ')'}${min != null && min > 20 ? ' · <b>atrasado</b> (o GitHub pode estar trocando de rodada)' : ''}${falhaNuvem ? ' · falha ao ler: ' + falhaNuvem : ''} · SOL ${SOLBRL ? fmtR(SOLBRL) : '—'} · teste desde ${S.inicio ? hora(S.inicio) : '—'}${lotesNuvem ? ' · lotes reais do robô: ' + lotesNuvem.map(x => x.toFixed(3)).join(' / ') + ' SOL, banca ' + (bancaNuvem || 0).toFixed(2) + ' SOL' : ''} · atualiza a cada 1 min`; }
+setTimeout(() => { cicloPainel(); setInterval(cicloPainel, 60000); }, 50);
 
 // ---------------- tela ----------------
 function desenha(){
@@ -404,7 +436,7 @@ function desenha(){
   else {
     h += `<table class="tb"><tr><th>Moeda</th><th>Entradas (quanto entrou em cada parte)</th><th class="n">Investido</th><th class="n">1ª entrada</th><th class="n">Preço médio</th><th class="n">Agora</th><th class="n">Resultado (R$)</th><th>♻ Recuperação (próxima parte)</th><th class="n">Tempo</th></tr>`;
     P.forEach(p => { const w = M[p.mint] || {}, hrs = (Date.now() - p.t0) / 3600000, n = p.partes.length, pct = p.pct || 0;
-      const tags = partesCfg.map((sol, k) => { const x = p.partes[k]; return x ? `<span class="tag ok">${k + 1}ª ${x.sol.toFixed(2)} SOL · ${fmtP(x.pPago)} · ${x.quedaPct.toFixed(0)}%</span>` : `<span class="tag esp">${k + 1}ª ${sol.toFixed(2)} SOL em −${quedasCfg[k]}%</span>`; }).join('');
+      const tags = partesCfg.map((sol, k) => { const x = p.partes[k]; return x ? `<span class="tag ok">${k + 1}ª ${x.sol.toFixed(3)} SOL · ${fmtP(x.pPago)} · ${x.quedaPct.toFixed(0)}%</span>` : `<span class="tag esp">${k + 1}ª ${sol.toFixed(3)} SOL em −${quedasCfg[k]}%</span>`; }).join('');
       const px1 = p.partes[0] ? p.partes[0].pPago : p.medio, mudouMedio = px1 ? (p.medio / px1 - 1) * 100 : 0;
       let rec;
       if (n >= 4) rec = `<span class="sub">todas as 4 partes usadas</span>`;
@@ -427,7 +459,7 @@ function desenha(){
   else {
     h += `<table class="tb"><tr><th>Moeda</th><th>Entradas</th><th class="n">Investido</th><th class="n">1ª entrada</th><th class="n">Preço médio</th><th class="n">Saída</th><th class="n">Resultado (R$)</th><th class="n">Abriu → Fechou</th><th>Motivo</th></tr>`;
     H.slice(0, 60).forEach(x => { const px1 = x.partes && x.partes[0] ? x.partes[0].pPago : x.medio;
-      const tags = (x.partes || []).map((y, k) => `<span class="tag ok">${k + 1}ª ${y.sol.toFixed(2)} SOL · ${fmtP(y.pPago)}</span>`).join('');
+      const tags = (x.partes || []).map((y, k) => `<span class="tag ok">${k + 1}ª ${y.sol.toFixed(3)} SOL · ${fmtP(y.pPago)}</span>`).join('');
       h += `<tr><td><b>${x.s}</b><br>${links(x.mint)}</td><td>${tags}</td><td class="n">${x.custo.toFixed(2)} SOL</td><td class="n">${fmtP(px1)}</td><td class="n"><b>${fmtP(x.medio)}</b></td><td class="n">${fmtP(x.pSaida)}</td>
         <td class="n" style="color:${corDir(x.res)}"><b>${x.res >= 0 ? '▲ +' : '▼ '}${x.pct.toFixed(1)}%</b>${SOLBRL || x.brl != null ? `<br><b style="font-size:14px">${sg(x.res)}${fmtR(x.brl != null ? x.brl : x.res * SOLBRL)}</b>` : ''}<br><span class="sub">${sg(x.res)}${x.res.toFixed(3)} SOL</span></td>
         <td class="n">${hora(x.t0)}<br>${hora(x.t1)} <span class="sub">(${x.horas.toFixed(1)} h)</span></td><td>${x.motivo}</td></tr>`; });
@@ -449,18 +481,130 @@ function desenha(){
   S.eventos.slice(0, 20).forEach(e => { h += `<div class="lin"><span style="color:${e.cor || COR.neutro}">${e.txt}${e.mint ? links(e.mint) : ''}</span><span class="sub">${hora(e.t)}</span></div>`; });
   document.getElementById('corpo').innerHTML = h;
 }
+// ---------------- 📆 CALENDÁRIO (v4.9) ----------------
+let calRef = null, calAberto = false;
+const sgC = v => (v >= 0 ? '+' : ''), rC = v => (v < 0 ? '−' : '+');
+const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+function calChave(t){ const d = new Date(t); return d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate(); }
+function calDados(){ const dia = {}, mes = {};
+  for (const x of S.hist) { const d = new Date(x.t1), brl = x.brl != null ? x.brl : (SOLBRL ? x.res * SOLBRL : null);
+    const k = calChave(x.t1), km = d.getFullYear() + '-' + d.getMonth();
+    const o = dia[k] || (dia[k] = { res:0, brl:0, ops:0, g:0 }); o.res += x.res; o.brl += brl || 0; o.ops++; if (x.res > 0) o.g++;
+    const m = mes[km] || (mes[km] = { res:0, brl:0, ops:0 }); m.res += x.res; m.brl += brl || 0; m.ops++; }
+  return { dia, mes }; }
+function calCor(v, a){ return v > 0 ? `rgba(34,197,94,${a})` : v < 0 ? `rgba(239,68,68,${a})` : '#111827'; }
+function desenhaCal(){
+  if (!calAberto) return;
+  if (!calRef) { const h = new Date(); calRef = new Date(h.getFullYear(), h.getMonth(), 1); }
+  const { dia, mes } = calDados(), ano = calRef.getFullYear(), m = calRef.getMonth();
+  const nDias = new Date(ano, m + 1, 0).getDate(), ini = (new Date(ano, m, 1).getDay() + 6) % 7;   // segunda = 0
+  let tot = 0, totR = 0, dG = 0, sG = 0, sGr = 0, dR = 0, sR = 0, sRr = 0;
+  for (let d = 1; d <= nDias; d++) { const o = dia[ano + '-' + m + '-' + d]; if (!o) continue; tot += o.res; totR += o.brl;
+    if (o.res > 0) { dG++; sG += o.res; sGr += o.brl; } else if (o.res < 0) { dR++; sR += o.res; sRr += o.brl; } }
+  const larg = (sG + Math.abs(sR)) ? sG / (sG + Math.abs(sR)) * 100 : 50;
+  const hoje = calChave(Date.now());
+  let h = `<div class="calTop"><b style="font-size:16px">📆 Calendário de resultado <span class="sub">(operações fechadas · horário de Brasília)</span></b>
+    <span><button onclick="calMuda(-1)">◀</button> <b style="display:inline-block;min-width:150px;text-align:center">${MESES[m]} ${ano}</b> <button onclick="calMuda(1)">▶</button> <button onclick="calFecha()">✕</button></span></div>
+    <div class="calTot" style="color:${corDir(tot)}">${sgC(tot)}${tot.toFixed(3)} SOL${totR ? ` <span style="font-size:16px">(${rC(tot)}${fmtR(Math.abs(totR))})</span>` : ''}</div>
+    <div class="calBarra"><i style="width:${larg}%;background:${COR.up}"></i><i style="width:${100 - larg}%;background:${COR.down}"></i></div>
+    <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:${COR.up}">${dG} dia(s) com ganho · +${sG.toFixed(3)} SOL${sGr ? ' (+' + fmtR(sGr) + ')' : ''}</span><span style="color:${COR.down}">${dR} dia(s) com perda · ${sR.toFixed(3)} SOL${sRr ? ' (−' + fmtR(Math.abs(sRr)) + ')' : ''}</span></div>
+    <div class="calGrade">${['S','T','Q','Q','S','S','D'].map((x, i) => `<div class="calCab">${['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'][i]}</div>`).join('')}`;
+  for (let i = 0; i < ini; i++) h += `<div></div>`;
+  for (let d = 1; d <= nDias; d++) { const k = ano + '-' + m + '-' + d, o = dia[k];
+    h += `<div class="calDia${k === hoje ? ' calHoje' : ''}" style="background:${o ? calCor(o.res, .18) : '#111827'};border-color:${o ? calCor(o.res, .45) : '#1f2937'}"><div class="n">${d}</div>`
+      + (o ? `<div class="v" style="color:${corDir(o.res)}">${sgC(o.res)}${o.res.toFixed(3)} SOL</div><div class="r" style="color:${corDir(o.res)}">${o.brl ? rC(o.res) + fmtR(Math.abs(o.brl)) + ' · ' : ''}${o.ops} op. · ${o.g} gain</div>`
+           : `<div class="v" style="color:#4b5563">0</div><div class="r"></div>`) + `</div>`; }
+  h += `</div><div class="sec" style="margin-top:14px;border-radius:6px">📊 ${ano} — resultado por mês</div><div class="calAno">`;
+  let totAno = 0, totAnoR = 0;
+  for (let i = 0; i < 12; i++) { const o = mes[ano + '-' + i]; if (o) { totAno += o.res; totAnoR += o.brl; }
+    h += `<div class="calMes" onclick="calVai(${ano},${i})" style="background:${o ? calCor(o.res, .18) : '#111827'};${i === m ? 'outline:2px solid #3b82f6;' : ''}">${MESES[i].slice(0, 3)}<b style="color:${o ? corDir(o.res) : '#4b5563'}">${o ? sgC(o.res) + o.res.toFixed(3) : '0'}</b>${o && o.brl ? `<span style="color:${corDir(o.res)}">${rC(o.res)}${fmtR(Math.abs(o.brl))}</span>` : ''}</div>`; }
+  h += `</div><div style="margin-top:8px;font-size:13px">Total de ${ano}: <b style="color:${corDir(totAno)}">${sgC(totAno)}${totAno.toFixed(3)} SOL${totAnoR ? ' (' + rC(totAno) + fmtR(Math.abs(totAnoR)) + ')' : ''}</b></div>`;
+  document.getElementById('calCaixa').innerHTML = h; }
+function calMuda(n){ calRef = new Date(calRef.getFullYear(), calRef.getMonth() + n, 1); desenhaCal(); }
+function calVai(a, m){ calRef = new Date(a, m, 1); desenhaCal(); }
+function calFecha(){ calAberto = false; document.getElementById('calFundo').style.display = 'none'; }
+document.getElementById('bCal').onclick = () => { calAberto = true; calRef = null; document.getElementById('calFundo').style.display = 'flex'; desenhaCal(); };
+document.getElementById('calFundo').onclick = e => { if (e.target.id === 'calFundo') calFecha(); };
+setInterval(desenhaCal, 15000);
+// ---------------- SIMULADOR: banca e tamanho das partes mudam tudo na hora ----------------
+const taxaFixa = () => (S.cfg.prioridadeSOL || 0) + (S.cfg.taxaRedeSOL || 0);
+function refazSaldo(){
+  const res = S.hist.reduce((a, h) => a + h.res, 0), presos = Object.values(S.pos).reduce((a, p) => a + p.custo + (p.aluguel || 0), 0);
+  S.saldo = S.solInicial + res - presos;
+}
+function refazDias(){
+  S.dias = (S.dias || []).map(d => { const hs = S.hist.filter(h => new Date(h.t1).toLocaleDateString('pt-BR') === d.dia); if (!hs.length) return d;
+    const res = hs.reduce((a, h) => a + h.res, 0); return Object.assign({}, d, { res, ganhos: hs.filter(h => h.res > 0).length, brl: d.brl != null && d.res ? +(d.brl * res / d.res).toFixed(2) : (SOLBRL ? +(res * SOLBRL).toFixed(2) : null) }); });
+}
+function refazDrawdown(){
+  S.pico = null; S.ddMax = null; S.ddMaxSol = 0; S.ddMaxT = 0; S.ddDias = {}; S.ddVivoDia = null;
+  try { if (S.dd && S.dd.sol) calculaCurva(); } catch(e) {}
+}
+// multiplica o tamanho de todas as partes por r (preço pago e horários iguais; taxa fixa por transação continua a mesma)
+function escalaPartes(r){
+  if (!(r > 0) || Math.abs(r - 1) < 1e-9) return;
+  const f = taxaFixa();
+  for (const p of Object.values(S.pos)) { const n = p.partes.length;
+    p.partes.forEach(x => { x.sol *= r; });
+    p.tok *= r; p.raw = Math.floor(p.raw * r);
+    p.custo = (p.custo - n * f) * r + n * f;
+    if (p.valor != null) { p.valor = (p.valor + f) * r - f; p.pct = (p.valor / p.custo - 1) * 100; } }
+  for (const h of S.hist) { const n = (h.partes || []).length, resV = h.res;
+    (h.partes || []).forEach(x => { x.sol *= r; });
+    h.custo = (h.custo - n * f) * r + n * f; h.venda = (h.venda + f) * r - f; h.res = h.venda - h.custo; h.pct = (h.venda / h.custo - 1) * 100;
+    if (h.brl != null && resV) h.brl = +(h.brl * h.res / resV).toFixed(2); }
+  refazSaldo(); refazDias(); refazDrawdown();
+}
+function simP1(v){
+  const c = S.cfg; if (!(v > 0)) return;
+  const r2 = c.parte2 / c.parte1, r3 = c.parte3 / c.parte1, r4 = c.parte4 / c.parte1, r = v / c.parte1;
+  c.parte1 = +v.toFixed(4); c.parte2 = +(v * r2).toFixed(4); c.parte3 = +(v * r3).toFixed(4); c.parte4 = +(v * r4).toFixed(4);
+  escalaPartes(r);
+  bancaAuto();
+}
+function margemCiclo(){ const c = S.cfg; return c.maxMoedas * (c.parte1 + c.parte2 + c.parte3 + c.parte4 + 5 * taxaFixa() + (c.aluguelSOL || 0)); }
+function bancaAuto(){ if (S.simAuto === false) return; simBanca(Math.ceil(margemCiclo() * 10 - 1e-9) / 10); }   // margem arredondada para cima (0,1 SOL)
+function simBanca(v){ if (!(v > 0)) return; S.solInicial = v; if (SOLBRL) S.cfg.bancaBRL = Math.round(v * SOLBRL); refazSaldo(); refazDrawdown(); }
+function mostraSim(focado){
+  const c = S.cfg;
+  if (focado !== 'b') document.getElementById('simBanca').value = S.solInicial != null ? +S.solInicial.toFixed(3) : '';
+  if (focado !== 'p') document.getElementById('simP1').value = +c.parte1.toFixed(4);
+  document.getElementById('simAuto').checked = S.simAuto !== false;
+  document.getElementById('simBancaR').textContent = SOLBRL && S.solInicial ? '= ' + fmtR(S.solInicial * SOLBRL) : '';
+  const porMoeda = c.parte1 + c.parte2 + c.parte3 + c.parte4 + 5 * taxaFixa() + (c.aluguelSOL || 0), margem = c.maxMoedas * porMoeda, falta = margem - (S.solInicial || 0);
+  document.getElementById('simPartes').innerHTML = `partes: <b style="color:#93c5fd">${[c.parte1, c.parte2, c.parte3, c.parte4].map(x => x.toFixed(3)).join(' / ')} SOL</b>
+    · <b>MARGEM p/ ${c.maxMoedas} moedas: <span style="color:#93c5fd;font-size:16px">${margem.toFixed(3)} SOL${SOLBRL ? ' = ' + fmtR(margem * SOLBRL) : ''}</span></b>
+    · ${falta > 0 ? `<b style="color:${COR.aviso}">banca não cobre: faltam ${falta.toFixed(3)} SOL${SOLBRL ? ' (' + fmtR(falta * SOLBRL) + ')' : ''}</b>` : `<b style="color:#93c5fd">banca cobre o ciclo · sobram ${(-falta).toFixed(3)} SOL</b>`}`;
+}
+document.getElementById('simAuto').onchange = e => { S.simAuto = e.target.checked; SIM.auto = e.target.checked; if (!SIM.auto) SIM.banca = S.solInicial; guardaSim(); if (S.simAuto) { bancaAuto(); salvar(); desenha(); desenhaCal(); atualizaCfg(); } mostraSim(''); };
+document.getElementById('simBanca').oninput = e => { const v = parseFloat(e.target.value); if (v > 0) { SIM.banca = v; SIM.auto = false; S.simAuto = false; guardaSim(); simBanca(v); salvar(); desenha(); desenhaCal(); mostraSim('b'); atualizaCfg(); } };
+document.getElementById('simP1').oninput = e => { const v = parseFloat(e.target.value); if (v > 0) { SIM.p1 = v; guardaSim(); simP1(v); salvar(); desenha(); desenhaCal(); mostraSim('p'); atualizaCfg(); } };
+document.getElementById('simBanca').onchange = () => ev(`Simulador: banca = ${S.solInicial.toFixed(3)} SOL`, COR.info);
+document.getElementById('simP1').onchange = () => ev(`Simulador: partes = ${[S.cfg.parte1, S.cfg.parte2, S.cfg.parte3, S.cfg.parte4].map(x => x.toFixed(3)).join(' / ')} SOL (todas as operações recalculadas)`, COR.info);
+setInterval(() => { const a = document.activeElement && document.activeElement.id; mostraSim(a === 'simBanca' ? 'b' : a === 'simP1' ? 'p' : ''); }, 2000);
+setTimeout(() => mostraSim(''), 300);
+
 // ajustes / botões
 const ROT = { bancaBRL:'Banca (R$)', idadeMinDias:'Idade mín. (dias)', mcMin:'MC mín. (US$)', mcMax:'MC máx. (US$)', liqMin:'Liquidez mín. (US$)', exigeProjeto:'Exigir site/X/telegram (1/0)',
   queda1:'1ª compra: queda da máx. 24 h (%)', queda2:'2ª compra (%)', queda3:'3ª compra (%)', queda4:'4ª compra (%)', parte1:'1ª parte (SOL)', parte2:'2ª parte (SOL)', parte3:'3ª parte (SOL)', parte4:'4ª parte (SOL)',
   alvo:'Alvo sobre o investido (%)', stop:'Stop (%) — 0 = sem stop', tempoMaxH:'Tempo máx. (h)', liqFuga:'Sai se liquidez < (US$)', maxMoedas:'Máx. moedas abertas', esperaH:'Espera p/ reentrar (h)', prioridadeSOL:'Prioridade (SOL)', taxaRedeSOL:'Taxa da rede (SOL)', aluguelSOL:'Conta da moeda (SOL, volta)', atrasoExecMs:'Atraso da ordem (ms)' };
+const AUTO = { parte2:1, parte3:1, parte4:1 };   // seguem a 1ª parte sozinhas
+function valorCfg(k){ if (k === 'bancaBRL') return SOLBRL && S.solInicial ? Math.round(S.solInicial * SOLBRL) : S.cfg.bancaBRL; return S.cfg[k]; }
 function montaCfg(){ const el = document.getElementById('cfg');
-  el.innerHTML = Object.keys(ROT).map(k => `<label>${ROT[k]}<input data-k="${k}" type="number" step="any" value="${S.cfg[k]}"></label>`).join('') + `<div class="sub" style="margin-top:6px">Banca só vale ao zerar o teste. O resto vale na hora.</div>`;
-  el.querySelectorAll('input').forEach(i => i.onchange = () => { const v = parseFloat(i.value); if (isFinite(v)) { S.cfg[i.dataset.k] = v; ev(`Ajuste: ${ROT[i.dataset.k]} = ${v}`, COR.neutro); salvar(); desenha(); } }); }
-// (painel) 
-// (painel) 
-// (painel) 
+  el.innerHTML = Object.keys(ROT).map(k => `<label>${ROT[k]}${AUTO[k] ? ' <span class="sub">(automática)</span>' : ''}<input data-k="${k}" type="number" step="any" value="${+(+valorCfg(k)).toFixed(6)}"${AUTO[k] ? ' readonly style="opacity:.75"' : ''}></label>`).join('') + `<div class="sub" style="margin-top:6px">Banca (R$) e 1ª parte mudam tudo na hora (igual à barra 🧪 SIMULADOR); 2ª, 3ª e 4ª partes seguem a 1ª sozinhas. O resto vale na hora.</div>`;
+  el.querySelectorAll('input').forEach(i => {
+    const k = i.dataset.k; if (AUTO[k]) return;
+    const aplica = () => { const v = parseFloat(i.value); if (!isFinite(v) || v <= 0 && (k === 'parte1' || k === 'bancaBRL')) return;
+      if (k === 'parte1') simP1(v); else if (k === 'bancaBRL') { if (SOLBRL) simBanca(v / SOLBRL); else S.cfg.bancaBRL = v; } else S.cfg[k] = v;
+      salvar(); desenha(); desenhaCal(); mostraSim(''); atualizaCfg(k); };
+    if (k === 'parte1' || k === 'bancaBRL') i.oninput = aplica; else i.onchange = aplica;
+    i.addEventListener('change', () => ev(`Ajuste: ${ROT[k]} = ${i.value}`, COR.neutro));
+  }); }
+// mantém os campos de Ajustes iguais à barra do simulador (sem mexer no campo que você está digitando)
+function atualizaCfg(focadoK){ const el = document.getElementById('cfg'); if (!el || el.style.display !== 'block') return;
+  el.querySelectorAll('input').forEach(i => { if (i.dataset.k === focadoK || i === document.activeElement) return; i.value = +(+valorCfg(i.dataset.k)).toFixed(6); }); }
 document.getElementById('bExp').onclick = () => {
-  const dados = { robo:'Robô Queda com Projeto — PAPEL — NUVEM', exportadoEm:new Date().toISOString(), testeDesde:new Date(S.inicio).toISOString(), cotacao:{ SOLBRL, SOLUSD }, solInicial:S.solInicial, saldoLivre:S.saldo,
+  const dados = { robo:'Robô Queda com Projeto — PAPEL — NUVEM (painel com simulação)', exportadoEm:new Date().toISOString(), testeDesde:new Date(S.inicio).toISOString(), cotacao:{ SOLBRL, SOLUSD }, solInicial:S.solInicial, saldoLivre:S.saldo,
     ajustes:S.cfg, posicoesAbertas:Object.values(S.pos), operacoes:S.hist, resultadoPorDia:S.dias, acontecimentos:S.eventos,
     vigiadas:Object.values(M).map(w => ({ s:w.s, mint:w.mint, idade:w.idade, mc:w.mcap, liq:w.liq, preco:w.p, max24:hiAtual(w), quedaPct:w.p && w.hi24 ? (w.p / hiAtual(w) - 1) * 100 : null })) };
   const a = document.createElement('a'), d = new Date(); a.href = URL.createObjectURL(new Blob([JSON.stringify(dados, null, 1)], { type:'application/json' }));
