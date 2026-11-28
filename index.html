@@ -49,6 +49,8 @@
   #sim{display:flex;flex-wrap:wrap;gap:14px;align-items:center;padding:10px 14px;margin:8px 12px;border:1px solid #3b82f6;border-radius:10px;background:#0f1a33}
   #sim input{width:90px;margin-left:6px;padding:5px 8px;border-radius:6px;border:1px solid #475569;background:#0b1220;color:#f8fafc;font-size:15px;font-weight:700}
   #sim label{color:#e2e8f0;font-weight:600}
+  #simReg input{width:70px;margin-left:6px;padding:4px 6px;border-radius:6px;border:1px solid #475569;background:#0b1220;color:#f8fafc;font-size:14px;font-weight:700}
+  #simReg label{color:#e2e8f0;font-weight:600}
   #corpo{overflow-x:auto} table.tb{min-width:980px}
 </style>
 </head>
@@ -56,7 +58,7 @@
 <div id="topo">
   <div><b>📉 Robô Queda com Projeto — PAPEL — NUVEM (calendário + simulador)</b> <span class="sub">(estilo da carteira BxVqJP · simulação: não usa carteira nem dinheiro)</span><br>
     <span id="status" class="sub">iniciando…</span></div>
-  <div><span id="modoFech"></span> <button id="bCal">📆 Calendário</button> <button id="bExp">⬇ Exportar JSON</button></div>
+  <div><button id="bCal">📆 Calendário</button> <button id="bExp">⬇ Exportar JSON</button></div>
 </div>
 <div id="sim">
   <b>🧪 SIMULADOR</b>
@@ -66,6 +68,7 @@
   <span id="simPartes" class="sub"></span>
   <span class="sub">· simulação só aqui no painel (muda na hora as operações abertas e fechadas, o saldo, a margem, o drawdown e o calendário) — o robô na nuvem continua com os lotes dele</span>
 </div>
+<div id="simReg" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:8px 14px;margin:0 12px 8px;border:1px solid #334155;border-radius:10px;background:#0f172a"></div>
 <div id="cfg"></div>
 <div class="cards" id="cards"></div>
 <div id="corpo"></div>
@@ -97,8 +100,6 @@ const PADRAO = {
   tempoMaxH: 72,        // v4.8: só depois das 4 partes — vende tudo X horas após a 4ª parte
   esperaSinal: 15,      // v4.10: no sinal (queda1) só MARCA o preço; compra a 1ª parte se cair mais X% a partir dali (0 = compra no sinal)
   esperaSinalH: 72,     // v4.10: o sinal vale por X horas; se não cair mais nesse tempo, é cancelado (0 = não vence)
-  volDesde: 2,          // v4.11: a partir de qual parte o preço médio só entra com volume subindo (últimas X h MAIOR que as X h anteriores); 2 = 2ª/3ª/4ª, 4 = só a 4ª, 0 = desligado
-  volJanelaH: 6,        // v4.11: janela do volume em horas (1 a 12)
   liqFuga: 10000,       // se a liquidez cair abaixo de US$ X, vende (sinal de puxada de liquidez)
   maxMoedas: 10,        // moedas abertas ao mesmo tempo
   esperaH: 6,           // depois de fechar uma moeda, espera X horas para entrar nela de novo
@@ -242,8 +243,6 @@ async function maxima24(){
     w.falhasHi = (w.falhasHi || 0) + 1; w.hi24 = 0; w.tHi = Date.now(); w.pool = null;
     if (w.falhasHi >= 2) { w.ruim = true; ev(`${w.s}: preço das velas não bate com a Jupiter — moeda ignorada (evita erro de máxima)`, COR.aviso, w.mint); }
     return; }
-  const J = Math.max(1, Math.min(12, Math.round(S.cfg.volJanelaH || 6)));   // v4.11: volume das velas de 1 h fechadas (últimas J h × J h anteriores)
-  w.volA = v.slice(1, 1 + J).reduce((s, k) => s + (+k[5] || 0), 0); w.volB = v.slice(1 + J, 1 + 2 * J).reduce((s, k) => s + (+k[5] || 0), 0); w.tVol = Date.now();
   w.falhasHi = 0; w.hi24 = hi; w.lo24 = Math.min(...v.slice(0, 24).map(k => +k[3])); w.tHi = Date.now(); w.hiVivo = 0;
 }
 const hiAtual = w => Math.max(w.hi24 || 0, w.hiVivo || 0);
@@ -329,16 +328,9 @@ async function avaliar(){
     const p = S.pos[w.mint];
     if (p) {   // já tem posição: compra as próximas partes se continuar caindo (referência = máxima da 1ª compra)
       const n = p.partes.length, q = (w.p / p.hiRef - 1) * 100;
-      const qs = [0, c.queda2, c.queda3, c.queda4], ps = [0, c.parte2, c.parte3, c.parte4];
-      if (n >= 1 && n <= 3 && q <= -qs[n]) {
-        if (c.volDesde > 0 && n + 1 >= c.volDesde) {   // v4.11: essa parte só entra se o volume estiver subindo (tem comprador); volume caindo = segura
-          const temVol = w.tVol && Date.now() - w.tVol < 3 * 3600000;
-          if (!temVol || !(w.volA > w.volB)) {
-            if (p.segurou !== n + 1) { p.segurou = n + 1; ev(`SEGUROU a ${n + 1}ª parte de ${w.s}: bateu −${qs[n]}% mas ${temVol ? `o volume está caindo (últimas ${c.volJanelaH} h ${fmtU(w.volA)} × anteriores ${fmtU(w.volB)})` : 'ainda sem o volume das velas'} — compra quando o volume subir`, COR.neutro, w.mint); salvar(); }
-            continue; }
-        }
-        await comprar(w, n + 1, ps[n]);
-      }
+      if (n === 1 && q <= -c.queda2) await comprar(w, 2, c.parte2);
+      else if (n === 2 && q <= -c.queda3) await comprar(w, 3, c.parte3);
+      else if (n === 3 && q <= -c.queda4) await comprar(w, 4, c.parte4);
       continue;
     }
     if (!w.passa || w.ruim) continue;
@@ -400,31 +392,86 @@ const URL_ESTADO = 'https://raw.githubusercontent.com/paulocesarcastro66-bot/rob
 let atualizadoNuvem = 0, falhaNuvem = '', ocupadoLaco = false, lotesNuvem = null, bancaNuvem = null;
 const SIM = (() => { try { return JSON.parse(localStorage.getItem('painelSim') || '{}'); } catch(e) { return {}; } })();
 function guardaSim(){ try { localStorage.setItem('painelSim', JSON.stringify(SIM)); } catch(e) {} }
-// ---------------- FECHADAS: Real × Simulado (v4.10 / v4.11) — só muda a tela; o robô e o histórico real não mudam ----------------
-let SIMFECH = null, MODO = (() => { try { return localStorage.getItem('painelModo') || 'real'; } catch(e) { return 'real'; } })();
-const NOMEMODO = { real:'Real', v410:'Simulado v4.10', v411:'Simulado v4.11 (atual)' };
-async function puxaSimFech(){ if (SIMFECH) return; try { const r = await fetch('sim_fechadas.json?t=' + Date.now(), { cache:'no-store' }); if (r.ok) SIMFECH = await r.json(); } catch(e) {} }
+// ---------------- SIMULAÇÃO AJUSTÁVEL: refaz fechadas e abertas pelas velas de 15 min com a regra que você escolher (só a tela; o robô e o histórico real não mudam) ----------------
+const CORTE_V410 = 1795875300000;   // 28/11 11:15 — entradas a partir daqui já foram feitas pela regra nova (v4.10): ficam como são
+let MODO = (() => { try { return localStorage.getItem('painelModo') === 'sim' ? 'sim' : 'real'; } catch(e) { return 'real'; } })();
+const REG = (() => { try { return Object.assign({ espera:15, validade:72, vol:0 }, JSON.parse(localStorage.getItem('painelReg') || '{}')); } catch(e) { return { espera:15, validade:72, vol:0 }; } })();
+let VELAS = (() => { try { return JSON.parse(localStorage.getItem('painelVelas') || '{}'); } catch(e) { return {}; } })(), baixando = '', baixandoAgora = false;
+function guardaReg(){ try { localStorage.setItem('painelReg', JSON.stringify(REG)); localStorage.setItem('painelModo', MODO); } catch(e) {} }
+function episodios(D){   // entradas reais do teste antes da regra nova: momento do sinal, preço do sinal e máxima de 24 h
+  return D.hist.concat(Object.values(D.pos)).filter(x => x.partes && x.partes[0] && x.t0 < CORTE_V410)
+    .map(x => ({ mint:x.mint, s:x.s, ts:x.t0, p0:x.partes[0].pPago, hi:x.hiRef })).sort((a, b) => a.ts - b.ts); }
+async function baixaVelas(eps){   // velas de 15 min (GeckoTerminal) de cada moeda do teste; guarda no navegador e renova a cada 1 h
+  if (baixandoAgora) return; baixandoAgora = true;
+  try { const ms = [...new Set(eps.map(e => e.mint))], falta = ms.filter(m => !VELAS[m] || Date.now() - VELAS[m].t > 3600000);
+    let i = 0;
+    for (const m of falta) { i++; baixando = `baixando velas para a simulação ${i}/${falta.length}…`; marcarNuvem();
+      try { let pool = VELAS[m] && VELAS[m].pool;
+        if (!pool) { const j = await (await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/tokens/${m}/pools?page=1`)).json(); await espera(2200);
+          const ps = (j.data || []).map(d => ({ a:d.attributes.address, l:+d.attributes.reserve_in_usd })).sort((a, b) => b.l - a.l); if (!ps.length) continue; pool = ps[0].a; }
+        const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/pools/${pool}/ohlcv/minute?aggregate=15&limit=1000&currency=usd&token=${m}`); await espera(2200);
+        if (r.status === 429) { await espera(20000); continue; }
+        const j = await r.json(), v = (j.data && j.data.attributes.ohlcv_list) || []; if (!v.length) continue;
+        VELAS[m] = { t:Date.now(), pool, k:v.map(x => [x[0] * 1000, +(+x[1]).toPrecision(5), +(+x[2]).toPrecision(5), +(+x[3]).toPrecision(5), +(+x[4]).toPrecision(5), Math.round(+x[5])]).sort((a, b) => a[0] - b[0]) };
+        try { localStorage.setItem('painelVelas', JSON.stringify(VELAS)); } catch(e) {}
+      } catch(e) {} }
+  } finally { baixando = ''; baixandoAgora = false; } }
+function simula(eps){   // regra: sinal → espera cair mais REG.espera% → 1ª parte; 2ª/3ª/4ª nas quedas da máxima; alvo sobre o investido; tempo depois da 4ª
+  const c = S.cfg, LOT = [c.parte1, c.parte2, c.parte3, c.parte4], QD = [c.queda1, c.queda2, c.queda3, c.queda4], f = c.prioridadeSOL + c.taxaRedeSOL, F = 0.01, U = SOLUSD || 1;
+  const hist = [], pos = {}, livre = {}; let semVelas = 0;
+  const vs = (K, i) => { let s = 0; for (let j = Math.max(0, i - 23); j <= i; j++) s += K[j][5]; return s; };
+  eps.forEach((e, n) => { const V = VELAS[e.mint]; if (!V || !V.k.length || V.k[0][0] > e.ts) { semVelas++; return; }
+    if (livre[e.mint] && e.ts < livre[e.mint]) return;   // o robô não abre a mesma moeda duas vezes ao mesmo tempo
+    const K = V.k; let j = K.findIndex(k => k[0] + 900000 > e.ts); if (j < 0) { semVelas++; return; }
+    const alvoEntrada = e.p0 * (1 - (REG.espera || 0) / 100), limite = REG.validade > 0 ? e.ts + REG.validade * 3600000 : Infinity;
+    const partes = []; let tok = 0, custo = 0, t4 = 0, fim = null;
+    const compra = (px, t) => { const k = partes.length, sol = LOT[k]; tok += sol * U * (1 - F) / px; custo += sol + f; partes.push({ parte:k + 1, t, sol, pPago:px, quedaPct:(px / e.hi - 1) * 100 }); if (k === 3) t4 = t; };
+    if (!(REG.espera > 0)) compra(e.p0, e.ts);
+    for (; j < K.length && !fim; j++) { const [t, o, h, l, cl] = K[j];
+      if (!partes.length) { if (t > limite) break; if (l <= alvoEntrada) compra(alvoEntrada, t); continue; }
+      const pxAlvo = (custo * (1 + c.alvo / 100) + f) * U / (tok * (1 - F));
+      if (h >= pxAlvo) { fim = { t, px:pxAlvo, motivo:'alvo' }; break; }
+      const k = partes.length;
+      if (k < 4) { const lv = e.hi * (1 - QD[k] / 100);
+        if (REG.vol > 0 && k + 1 >= REG.vol) { if (cl <= lv && j >= 48 && vs(K, j) > vs(K, j - 24)) compra(cl, t); }
+        else if (l <= lv) compra(Math.min(lv, o), t); }
+      if (partes.length === 4 && t - t4 >= c.tempoMaxH * 3600000) fim = { t, px:cl, motivo:'tempo' }; }
+    if (!partes.length) return;
+    const medio = custo * U / tok;
+    if (fim) { const venda = tok * fim.px / U * (1 - F) - f, res = venda - custo; livre[e.mint] = fim.t;
+      hist.push({ s:e.s, mint:e.mint, t0:partes[0].t, t1:fim.t, horas:(fim.t - partes[0].t) / 3600000, motivo:fim.motivo + ' (simulado)', partes, custo, venda, res, pct:(venda / custo - 1) * 100, medio, pSaida:fim.px, hiRef:e.hi, brl:null }); }
+    else { const w = M[e.mint], pNow = (w && w.p) || K[K.length - 1][4], valor = tok * pNow / U * (1 - F) - f; livre[e.mint] = Infinity;
+      pos[e.mint + '#sim' + n] = { mint:e.mint, s:e.s, t0:partes[0].t, hiRef:e.hi, raw:0, tok, custo, partes, dec:0, aluguel:c.aluguelSOL || 0, medio, valor, pct:(valor / custo - 1) * 100, tV:Date.now() }; } });
+  return { hist, pos, semVelas }; }
 function aplicaModo(){
-  if (MODO === 'real' || !SIMFECH || !SIMFECH[MODO]) return;
-  const d = SIMFECH[MODO]; S.hist = JSON.parse(JSON.stringify(d.hist));   // fechadas refeitas pelas velas de 15 min com a regra da versão
-  for (const m of Object.keys(S.pos)) if (!d.abertas.includes(m)) delete S.pos[m];   // na simulação essas moedas já tinham fechado (ou nem entrado)
+  if (MODO !== 'sim') return;
+  const D = { hist:S.hist, pos:S.pos }, eps = episodios(D);
+  baixaVelas(eps).then(() => { if (!ocupadoLaco) cicloPainel(); });
+  const r = simula(eps); if (r.semVelas >= eps.length) return;   // ainda sem velas: mostra o real até baixar
+  const novosH = S.hist.filter(h => h.t0 >= CORTE_V410), novosP = Object.fromEntries(Object.entries(S.pos).filter(([k, p]) => p.t0 >= CORTE_V410));
+  S.hist = novosH.concat(r.hist).sort((a, b) => b.t1 - a.t1); S.pos = Object.assign({}, r.pos, novosP);
   const hoje = diaBR(Date.now()), g = {};
   for (const h of S.hist) { const k = diaBR(h.t1); if (k === hoje) continue; const o = g[k] || (g[k] = { dia:k, t:h.t1, ops:0, ganhos:0, res:0 }); o.ops++; if (h.res > 0) o.ganhos++; o.res += h.res; }
   S.dias = Object.values(g).sort((a, b) => b.t - a.t).map(o => ({ dia:o.dia, ops:o.ops, ganhos:o.ganhos, res:o.res, brl:SOLBRL ? +(o.res * SOLBRL).toFixed(2) : null }));
   if (S.solInicial != null) refazSaldo();
   refazDrawdown();
 }
-function botoesModo(){ const el = document.getElementById('modoFech'); if (!el) return;
-  el.innerHTML = '<span class="sub">Fechadas:</span> ' + Object.keys(NOMEMODO).map(k => `<button data-modo="${k}" style="${k === MODO ? 'background:#1d4ed8;border-color:#3b82f6;color:#fff;font-weight:600' : ''}">${NOMEMODO[k]}</button>`).join(' ');
-  el.querySelectorAll('button').forEach(b => b.onclick = () => { MODO = b.dataset.modo; try { localStorage.setItem('painelModo', MODO); } catch(e) {} botoesModo(); cicloPainel(); setTimeout(cicloPainel, 2500); }); }
-function aplicaSim(){
-  S.simAuto = SIM.auto !== false;
-  if (SIM.p1 > 0 && Math.abs(SIM.p1 - S.cfg.parte1) > 1e-9) simP1(SIM.p1);          // já ajusta a banca se "acompanha a margem"
-  else if (S.simAuto && SIM.p1 > 0) bancaAuto();
-  if (!S.simAuto && SIM.banca > 0) simBanca(SIM.banca);
-}
+function botoesModo(){ const el = document.getElementById('simReg'); if (!el) return;
+  if (!el.dataset.ok) { el.dataset.ok = 1;
+    el.innerHTML = `<b>📼 FECHADAS E ABERTAS:</b> <button data-modo="real">Real</button> <button data-modo="sim">Simulado</button>
+      <label>Esperar cair mais após o sinal (%) <input id="regEsp" type="number" step="1" min="0"></label>
+      <label>Sinal vale por (h) <input id="regVal" type="number" step="1" min="0"></label>
+      <label>Volume subindo a partir da parte (0 = desligado) <input id="regVol" type="number" step="1" min="0" max="4"></label>
+      <span id="regInfo" class="sub"></span>`;
+    el.querySelectorAll('button').forEach(b => b.onclick = () => { MODO = b.dataset.modo; guardaReg(); botoesModo(); cicloPainel(); setTimeout(cicloPainel, 2500); });
+    const liga = (id, k) => { const i = document.getElementById(id); i.onchange = () => { REG[k] = Math.max(0, +i.value || 0); guardaReg(); if (MODO !== 'sim') { MODO = 'sim'; guardaReg(); } botoesModo(); cicloPainel(); setTimeout(cicloPainel, 2500); }; };
+    liga('regEsp', 'espera'); liga('regVal', 'validade'); liga('regVol', 'vol'); }
+  el.querySelectorAll('button').forEach(b => b.style.cssText = b.dataset.modo === MODO ? 'background:#1d4ed8;border-color:#3b82f6;color:#fff;font-weight:600' : '');
+  const a = document.activeElement && document.activeElement.id;
+  if (a !== 'regEsp') document.getElementById('regEsp').value = REG.espera; if (a !== 'regVal') document.getElementById('regVal').value = REG.validade; if (a !== 'regVol') document.getElementById('regVol').value = REG.vol;
+  document.getElementById('regInfo').textContent = MODO === 'sim' ? (baixando || '· refaz as entradas de 20/11 até 28/11 11:15 pelas velas de 15 min (alvo, quedas, lotes e tempo vêm do robô; entradas depois disso ficam como são)') : '· mostrando o que o robô fez de verdade'; }
 async function puxarNuvem(){
-  try { await puxaSimFech(); const r = await fetch(URL_ESTADO + '?t=' + Date.now(), { cache:'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status);
+  try { const r = await fetch(URL_ESTADO + '?t=' + Date.now(), { cache:'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json(); if (!d.estado) throw new Error('sem estado');
     S = d.estado; S.cfg = Object.assign({}, PADRAO, S.cfg || {}); atualizadoNuvem = d.atualizado || 0; falhaNuvem = '';
     lotesNuvem = [S.cfg.parte1, S.cfg.parte2, S.cfg.parte3, S.cfg.parte4]; bancaNuvem = S.solInicial;
@@ -439,7 +486,7 @@ async function cicloPainel(){ if (ocupadoLaco) return; ocupadoLaco = true;
   finally { ocupadoLaco = false; desenha(); desenhaCal(); mostraSim(''); marcarNuvem(); } }
 function marcarNuvem(){ const min = atualizadoNuvem ? (Date.now() - atualizadoNuvem) / 60000 : null;
   const cor = min == null ? COR.aviso : min > 20 ? COR.aviso : COR.info;
-  document.getElementById('status').innerHTML = `<span style="color:${cor}">☁ robô na nuvem</span> · estado salvo ${min == null ? '—' : 'há ' + min.toFixed(0) + ' min (' + hora(atualizadoNuvem) + ')'}${min != null && min > 20 ? ' · <b>atrasado</b> (o GitHub pode estar trocando de rodada)' : ''}${falhaNuvem ? ' · falha ao ler: ' + falhaNuvem : ''} · SOL ${SOLBRL ? fmtR(SOLBRL) : '—'} · teste desde ${S.inicio ? hora(S.inicio) : '—'}${lotesNuvem ? ' · lotes reais do robô: ' + lotesNuvem.map(x => x.toFixed(3)).join(' / ') + ' SOL, banca ' + (bancaNuvem || 0).toFixed(2) + ' SOL' : ''} · atualiza a cada 1 min${MODO !== 'real' ? ` · <b style="color:${COR.aviso}">MOSTRANDO ${NOMEMODO[MODO].toUpperCase()}: fechadas refeitas pelas velas (o real continua guardado — botão Real)</b>` : ''}`; botoesModo(); }
+  document.getElementById('status').innerHTML = `<span style="color:${cor}">☁ robô na nuvem</span> · estado salvo ${min == null ? '—' : 'há ' + min.toFixed(0) + ' min (' + hora(atualizadoNuvem) + ')'}${min != null && min > 20 ? ' · <b>atrasado</b> (o GitHub pode estar trocando de rodada)' : ''}${falhaNuvem ? ' · falha ao ler: ' + falhaNuvem : ''} · SOL ${SOLBRL ? fmtR(SOLBRL) : '—'} · teste desde ${S.inicio ? hora(S.inicio) : '—'}${lotesNuvem ? ' · lotes reais do robô: ' + lotesNuvem.map(x => x.toFixed(3)).join(' / ') + ' SOL, banca ' + (bancaNuvem || 0).toFixed(2) + ' SOL' : ''} · atualiza a cada 1 min${MODO === 'sim' ? ` · <b style="color:${COR.aviso}">MOSTRANDO SIMULADO (esperar ${REG.espera}%${REG.vol > 0 ? ', volume a partir da ' + REG.vol + 'ª' : ''}): fechadas e abertas refeitas pelas velas — o real continua guardado (botão Real)</b>` : ''}`; botoesModo(); }
 setTimeout(() => { cicloPainel(); setInterval(cicloPainel, 60000); }, 50);
 
 // ---------------- tela ----------------
@@ -487,7 +534,7 @@ function desenha(){
       if (n >= 4) rec = `<span class="sub">todas as 4 partes usadas</span>`;
       else { const alvoP = p.hiRef * (1 - quedasCfg[n] / 100), falta = w.p ? (alvoP / w.p - 1) * 100 : null;
         const tokNovo = partesCfg[n] * SOLUSD / alvoP, medioNovo = (p.custo * SOLUSD + partesCfg[n] * SOLUSD) / (p.tok + tokNovo);
-        rec = `<span class="rec">${n + 1}ª parte: ${partesCfg[n].toFixed(2)} SOL</span> a ${fmtP(alvoP)} (−${quedasCfg[n]}% da máx.)<br><span class="sub">${falta != null ? 'falta ' + falta.toFixed(1) + '% · ' : ''}médio iria de ${fmtP(p.medio)} → ${fmtP(medioNovo)} (${((medioNovo / p.medio - 1) * 100).toFixed(1)}%)</span>${c.volDesde > 0 && n + 1 >= c.volDesde ? '<br><span class="sub">volume ' + c.volJanelaH + ' h: ' + (w.tVol ? (w.volA > w.volB ? '<b style="color:' + COR.info + '">subindo — pode fazer o médio</b>' : '<b style="color:' + COR.aviso + '">caindo — segura o preço médio</b>') + ' (' + fmtU(w.volA || 0) + ' × ' + fmtU(w.volB || 0) + ')' : 'aguardando as velas') + '</span>' : ''}`; }
+        rec = `<span class="rec">${n + 1}ª parte: ${partesCfg[n].toFixed(2)} SOL</span> a ${fmtP(alvoP)} (−${quedasCfg[n]}% da máx.)<br><span class="sub">${falta != null ? 'falta ' + falta.toFixed(1) + '% · ' : ''}médio iria de ${fmtP(p.medio)} → ${fmtP(medioNovo)} (${((medioNovo / p.medio - 1) * 100).toFixed(1)}%)</span>`; }
       h += `<tr><td><b>${p.s}</b><br>${links(p.mint)}<br><span class="sub">MC ${w.mcap ? fmtU(w.mcap) : '—'}</span></td>
         <td>${tags}</td>
         <td class="n"><b>${p.custo.toFixed(2)} SOL</b><br><span class="sub">${n} de 4 partes</span></td>
@@ -637,7 +684,7 @@ setTimeout(() => mostraSim(''), 300);
 // ajustes / botões
 const ROT = { bancaBRL:'Banca (R$)', idadeMinDias:'Idade mín. (dias)', mcMin:'MC mín. (US$)', mcMax:'MC máx. (US$)', liqMin:'Liquidez mín. (US$)', exigeProjeto:'Exigir site/X/telegram (1/0)',
   queda1:'1ª compra: queda da máx. 24 h (%)', queda2:'2ª compra (%)', queda3:'3ª compra (%)', queda4:'4ª compra (%)', parte1:'1ª parte (SOL)', parte2:'2ª parte (SOL)', parte3:'3ª parte (SOL)', parte4:'4ª parte (SOL)',
-  alvo:'Alvo sobre o investido (%)', stop:'Stop (%) — 0 = sem stop', tempoMaxH:'Tempo máx. (h)', liqFuga:'Sai se liquidez < (US$)', maxMoedas:'Máx. moedas abertas', esperaH:'Espera p/ reentrar (h)', esperaSinal:'Esperar cair mais após o sinal (%) — 0 = compra no sinal', esperaSinalH:'Sinal vale por (h)', volDesde:'Volume subindo p/ comprar a partir da parte (2/3/4, 0 = desligado)', volJanelaH:'Janela do volume (h)', prioridadeSOL:'Prioridade (SOL)', taxaRedeSOL:'Taxa da rede (SOL)', aluguelSOL:'Conta da moeda (SOL, volta)', atrasoExecMs:'Atraso da ordem (ms)' };
+  alvo:'Alvo sobre o investido (%)', stop:'Stop (%) — 0 = sem stop', tempoMaxH:'Tempo máx. (h)', liqFuga:'Sai se liquidez < (US$)', maxMoedas:'Máx. moedas abertas', esperaH:'Espera p/ reentrar (h)', esperaSinal:'Esperar cair mais após o sinal (%) — 0 = compra no sinal', esperaSinalH:'Sinal vale por (h)', prioridadeSOL:'Prioridade (SOL)', taxaRedeSOL:'Taxa da rede (SOL)', aluguelSOL:'Conta da moeda (SOL, volta)', atrasoExecMs:'Atraso da ordem (ms)' };
 const AUTO = { parte2:1, parte3:1, parte4:1 };   // seguem a 1ª parte sozinhas
 function valorCfg(k){ if (k === 'bancaBRL') return SOLBRL && S.solInicial ? Math.round(S.solInicial * SOLBRL) : S.cfg.bancaBRL; return S.cfg[k]; }
 function montaCfg(){ const el = document.getElementById('cfg');
