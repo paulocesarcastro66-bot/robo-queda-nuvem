@@ -56,7 +56,7 @@
 <div id="topo">
   <div><b>📉 Robô Queda com Projeto — PAPEL — NUVEM (calendário + simulador)</b> <span class="sub">(estilo da carteira BxVqJP · simulação: não usa carteira nem dinheiro)</span><br>
     <span id="status" class="sub">iniciando…</span></div>
-  <div><button id="bCal">📆 Calendário</button> <button id="bExp">⬇ Exportar JSON</button></div>
+  <div><span id="modoFech"></span> <button id="bCal">📆 Calendário</button> <button id="bExp">⬇ Exportar JSON</button></div>
 </div>
 <div id="sim">
   <b>🧪 SIMULADOR</b>
@@ -400,6 +400,23 @@ const URL_ESTADO = 'https://raw.githubusercontent.com/paulocesarcastro66-bot/rob
 let atualizadoNuvem = 0, falhaNuvem = '', ocupadoLaco = false, lotesNuvem = null, bancaNuvem = null;
 const SIM = (() => { try { return JSON.parse(localStorage.getItem('painelSim') || '{}'); } catch(e) { return {}; } })();
 function guardaSim(){ try { localStorage.setItem('painelSim', JSON.stringify(SIM)); } catch(e) {} }
+// ---------------- FECHADAS: Real × Simulado (v4.10 / v4.11) — só muda a tela; o robô e o histórico real não mudam ----------------
+let SIMFECH = null, MODO = (() => { try { return localStorage.getItem('painelModo') || 'real'; } catch(e) { return 'real'; } })();
+const NOMEMODO = { real:'Real', v410:'Simulado v4.10', v411:'Simulado v4.11 (atual)' };
+async function puxaSimFech(){ if (SIMFECH) return; try { const r = await fetch('sim_fechadas.json?t=' + Date.now(), { cache:'no-store' }); if (r.ok) SIMFECH = await r.json(); } catch(e) {} }
+function aplicaModo(){
+  if (MODO === 'real' || !SIMFECH || !SIMFECH[MODO]) return;
+  const d = SIMFECH[MODO]; S.hist = JSON.parse(JSON.stringify(d.hist));   // fechadas refeitas pelas velas de 15 min com a regra da versão
+  for (const m of Object.keys(S.pos)) if (!d.abertas.includes(m)) delete S.pos[m];   // na simulação essas moedas já tinham fechado (ou nem entrado)
+  const hoje = diaBR(Date.now()), g = {};
+  for (const h of S.hist) { const k = diaBR(h.t1); if (k === hoje) continue; const o = g[k] || (g[k] = { dia:k, t:h.t1, ops:0, ganhos:0, res:0 }); o.ops++; if (h.res > 0) o.ganhos++; o.res += h.res; }
+  S.dias = Object.values(g).sort((a, b) => b.t - a.t).map(o => ({ dia:o.dia, ops:o.ops, ganhos:o.ganhos, res:o.res, brl:SOLBRL ? +(o.res * SOLBRL).toFixed(2) : null }));
+  if (S.solInicial != null) refazSaldo();
+  refazDrawdown();
+}
+function botoesModo(){ const el = document.getElementById('modoFech'); if (!el) return;
+  el.innerHTML = '<span class="sub">Fechadas:</span> ' + Object.keys(NOMEMODO).map(k => `<button data-modo="${k}" style="${k === MODO ? 'background:#1d4ed8;border-color:#3b82f6;color:#fff;font-weight:600' : ''}">${NOMEMODO[k]}</button>`).join(' ');
+  el.querySelectorAll('button').forEach(b => b.onclick = () => { MODO = b.dataset.modo; try { localStorage.setItem('painelModo', MODO); } catch(e) {} botoesModo(); cicloPainel(); setTimeout(cicloPainel, 2500); }); }
 function aplicaSim(){
   S.simAuto = SIM.auto !== false;
   if (SIM.p1 > 0 && Math.abs(SIM.p1 - S.cfg.parte1) > 1e-9) simP1(SIM.p1);          // já ajusta a banca se "acompanha a margem"
@@ -407,12 +424,13 @@ function aplicaSim(){
   if (!S.simAuto && SIM.banca > 0) simBanca(SIM.banca);
 }
 async function puxarNuvem(){
-  try { const r = await fetch(URL_ESTADO + '?t=' + Date.now(), { cache:'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status);
+  try { await puxaSimFech(); const r = await fetch(URL_ESTADO + '?t=' + Date.now(), { cache:'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json(); if (!d.estado) throw new Error('sem estado');
     S = d.estado; S.cfg = Object.assign({}, PADRAO, S.cfg || {}); atualizadoNuvem = d.atualizado || 0; falhaNuvem = '';
     lotesNuvem = [S.cfg.parte1, S.cfg.parte2, S.cfg.parte3, S.cfg.parte4]; bancaNuvem = S.solInicial;
     for (const k of Object.keys(M)) delete M[k]; Object.assign(M, d.vigia || {});
     if (d.cotacao) { if (d.cotacao.SOLBRL > 0) SOLBRL = d.cotacao.SOLBRL; if (d.cotacao.SOLUSD > 0) SOLUSD = d.cotacao.SOLUSD; }
+    aplicaModo();
   } catch (e) { falhaNuvem = e.message; } }
 async function cicloPainel(){ if (ocupadoLaco) return; ocupadoLaco = true;
   try { await puxarNuvem(); const b = SOLBRL, u = SOLUSD; await cotacao(); if (!(SOLBRL > 0)) SOLBRL = b; if (!(SOLUSD > 0)) SOLUSD = u;
@@ -421,7 +439,7 @@ async function cicloPainel(){ if (ocupadoLaco) return; ocupadoLaco = true;
   finally { ocupadoLaco = false; desenha(); desenhaCal(); mostraSim(''); marcarNuvem(); } }
 function marcarNuvem(){ const min = atualizadoNuvem ? (Date.now() - atualizadoNuvem) / 60000 : null;
   const cor = min == null ? COR.aviso : min > 20 ? COR.aviso : COR.info;
-  document.getElementById('status').innerHTML = `<span style="color:${cor}">☁ robô na nuvem</span> · estado salvo ${min == null ? '—' : 'há ' + min.toFixed(0) + ' min (' + hora(atualizadoNuvem) + ')'}${min != null && min > 20 ? ' · <b>atrasado</b> (o GitHub pode estar trocando de rodada)' : ''}${falhaNuvem ? ' · falha ao ler: ' + falhaNuvem : ''} · SOL ${SOLBRL ? fmtR(SOLBRL) : '—'} · teste desde ${S.inicio ? hora(S.inicio) : '—'}${lotesNuvem ? ' · lotes reais do robô: ' + lotesNuvem.map(x => x.toFixed(3)).join(' / ') + ' SOL, banca ' + (bancaNuvem || 0).toFixed(2) + ' SOL' : ''} · atualiza a cada 1 min`; }
+  document.getElementById('status').innerHTML = `<span style="color:${cor}">☁ robô na nuvem</span> · estado salvo ${min == null ? '—' : 'há ' + min.toFixed(0) + ' min (' + hora(atualizadoNuvem) + ')'}${min != null && min > 20 ? ' · <b>atrasado</b> (o GitHub pode estar trocando de rodada)' : ''}${falhaNuvem ? ' · falha ao ler: ' + falhaNuvem : ''} · SOL ${SOLBRL ? fmtR(SOLBRL) : '—'} · teste desde ${S.inicio ? hora(S.inicio) : '—'}${lotesNuvem ? ' · lotes reais do robô: ' + lotesNuvem.map(x => x.toFixed(3)).join(' / ') + ' SOL, banca ' + (bancaNuvem || 0).toFixed(2) + ' SOL' : ''} · atualiza a cada 1 min${MODO !== 'real' ? ` · <b style="color:${COR.aviso}">MOSTRANDO ${NOMEMODO[MODO].toUpperCase()}: fechadas refeitas pelas velas (o real continua guardado — botão Real)</b>` : ''}`; botoesModo(); }
 setTimeout(() => { cicloPainel(); setInterval(cicloPainel, 60000); }, 50);
 
 // ---------------- tela ----------------
