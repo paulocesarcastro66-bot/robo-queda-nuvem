@@ -1,0 +1,463 @@
+
+// ============================================================================
+// Robô Queda com Projeto — PAPEL v4.11
+// v4.11 = v4.10 + filtro de volume no preço médio (volDesde = 2: 2ª, 3ª e 4ª parte): bateu o gatilho mas o volume das últimas 6 h está menor que o das 6 h anteriores (ninguém comprando) → segura; compra quando o volume voltar a subir.
+// v4.10 = v4.8 + espera no sinal: quando a moeda cai queda1% só marca o preço e compra a 1ª parte se cair mais esperaSinal% (padrão 15%).
+// v4.8 = v4.7.1 + regra nova de tempo: NÃO fecha por tempo enquanto não comprou as 4 partes;
+//        depois da 4ª parte, fecha se passar tempoMaxH horas (contadas da 4ª parte) sem bater o alvo.
+// Operacional estudado na carteira BxVqJP (Maestro): só moedas antigas e com projeto; compra quando a moeda
+// já caiu forte da máxima de 24 h, faz PREÇO MÉDIO em 3 partes enquanto cai, NÃO usa stop curto, e vende
+// tudo quando o preço médio estiver no lucro (+15%) — segura de horas a dias (máx. 3 dias).
+// Execução simulada pela cotação REAL da Jupiter (compra e venda de verdade, com taxa da pool e impacto).
+// Moedas: listas da Jupiter (as mais negociadas / orgânicas / em alta 24 h). Máxima de 24 h: velas de 1 h do GeckoTerminal.
+// ============================================================================
+const COR = { up:'#22c55e', down:'#ef4444', neutro:'#cbd5e1', info:'#3b82f6', aviso:'#f59e0b' };
+const SOLM = 'So11111111111111111111111111111111111111112';
+const PADRAO = {
+  bancaBRL: 1760,
+  idadeMinDias: 5,      // só moedas com X dias ou mais
+  mcMin: 200000, mcMax: 50000000,
+  liqMin: 40000,        // liquidez mínima (US$)
+  exigeProjeto: 1,      // 1 = precisa ter site, X (twitter) ou telegram
+  queda1: 30, queda2: 45, queda3: 60, queda4: 70,   // compra 1ª/2ª/3ª/4ª parte quando estiver X% abaixo da máxima de 24 h
+  parte1: 0.03, parte2: 0.06, parte3: 0.12, parte4: 0.19,   // SOL de cada parte (preço médio crescente)
+  alvo: 15,             // vende tudo quando o valor de venda (real) estiver +X% sobre o total investido
+  stop: 0,              // 0 = sem stop (como ela). >0 = vende se ficar −X% sobre o investido
+  tempoMaxH: 72,        // v4.8: só depois das 4 partes — vende tudo X horas após a 4ª parte
+  esperaSinal: 15,      // v4.10: no sinal (queda1) só MARCA o preço; compra a 1ª parte se cair mais X% a partir dali (0 = compra no sinal)
+  esperaSinalH: 72,     // v4.10: o sinal vale por X horas; se não cair mais nesse tempo, é cancelado (0 = não vence)
+  volDesde: 2,          // v4.11: a partir de qual parte o preço médio só entra com volume subindo (últimas X h MAIOR que as X h anteriores); 2 = 2ª/3ª/4ª, 4 = só a 4ª, 0 = desligado
+  volJanelaH: 6,        // v4.11: janela do volume em horas (1 a 12)
+  liqFuga: 10000,       // se a liquidez cair abaixo de US$ X, vende (sinal de puxada de liquidez)
+  maxMoedas: 10,        // moedas abertas ao mesmo tempo
+  esperaH: 6,           // depois de fechar uma moeda, espera X horas para entrar nela de novo
+  prioridadeSOL: 0.0001,
+  taxaRedeSOL: 0.000005,   // taxa base da Solana por transação
+  aluguelSOL: 0.00204,     // conta da moeda: fica presa enquanto a posição está aberta e volta ao vender (fechar conta)
+  atrasoExecMs: 1000
+};
+const CHAVE = 'roboQuedaProjetoV471';
+let S = carregar();
+// ---------------- migração: pega o teste mais completo que existir (v4.6 → v4.5 → v4.3/v4.4), refeito com partes mínimas, banca 4,1 SOL, taxa da rede e conta da moeda ----------------
+const BANCA_SOL = 4.1;
+function para45(v){ const T = novo();
+    const P2 = PADRAO, novoTam = n => [P2.parte1, P2.parte2, P2.parte3, P2.parte4][n - 1] || P2.parte4;
+    const prioV = (v.cfg && v.cfg.prioridadeSOL != null) ? v.cfg.prioridadeSOL : 0.001, prio = P2.prioridadeSOL;
+    const refaz = partes => { let velho = 0, novo = 0; const ps = partes.map(x => { const nt = novoTam(x.parte); velho += x.sol / x.pPago; novo += nt / x.pPago; return Object.assign({}, x, { solV43:x.sol, sol:nt }); });
+      const den = ps.reduce((a, x) => a + x.sol / x.pPago, 0);
+      return { ps, razao: velho ? novo / velho : 1, custo: ps.reduce((a, x) => a + x.sol + prio, 0), medio: den ? ps.reduce((a, x) => a + x.sol, 0) / den : 0 }; };
+    const hist = (v.hist || []).map(h => { const r = refaz(h.partes || []); const venda = ((h.venda || 0) + prioV) * r.razao - prio; const res = venda - r.custo;
+      const brl = h.brl != null && h.res ? +(h.brl * res / h.res).toFixed(2) : null;
+      return Object.assign({}, h, { partes:r.ps, custo:r.custo, venda, res, brl, pct:(venda / r.custo - 1) * 100, medio:r.medio || h.medio, pSaida: h.pSaida, migradoV43:true }); });
+    const pos = {}; let presos = 0;
+    for (const [m, p] of Object.entries(v.pos || {})) { const r = refaz(p.partes || []);
+      const valor = p.valor != null ? (p.valor + prioV) * r.razao - prio : null;
+      pos[m] = Object.assign({}, p, { partes:r.ps, raw:Math.floor(p.raw * r.razao), tok:p.tok * r.razao, custo:r.custo, valor, pct: valor != null ? (valor / r.custo - 1) * 100 : p.pct, medio:r.medio || p.medio });
+      presos += r.custo; }
+    const dias = (v.dias || []).map(d => { const hs = hist.filter(h => new Date(h.t1).toLocaleDateString('pt-BR') === d.dia); if (!hs.length) return d;
+      const res = hs.reduce((a, h) => a + h.res, 0); return Object.assign({}, d, { res, ganhos: hs.filter(h => h.res > 0).length, ops: hs.length, brl: d.brl != null && d.res ? +(d.brl * res / d.res).toFixed(2) : null }); });
+    T.cfg = Object.assign({}, v.cfg || {}, { parte1:P2.parte1, parte2:P2.parte2, parte3:P2.parte3, parte4:P2.parte4, prioridadeSOL:prio });
+    T.inicio = v.inicio; T.solInicial = 4; T.ult = v.ult || {}; T.dias = dias; T.diaAtual = v.diaAtual || T.diaAtual;
+    T.hist = hist; T.pos = pos; T.saldo = 4 + hist.reduce((a, h) => a + h.res, 0) - presos; T.pico = null; T.ddMax = null; T.ajustarBanca = true;
+    T.eventos = [{ t:Date.now(), txt:`Teste refeito com as partes mínimas 0,03 / 0,06 / 0,12 / 0,19 SOL, prioridade 0,0001 e banca de ${4} SOL: ${hist.length} fechadas e ${Object.keys(pos).length} abertas (mesmos preços e horários)`, cor:'#3b82f6' }].concat(v.eventos || []).slice(0, 60);
+  return T; }
+function para46(v){ const T = novo();
+    const rede = PADRAO.taxaRedeSOL, alug = PADRAO.aluguelSOL;
+    const hist = (v.hist || []).map(h => { const n = (h.partes || []).length, custo = h.custo + n * rede, venda = h.venda - rede, res = venda - custo;
+      return Object.assign({}, h, { custo, venda, res, pct:(venda / custo - 1) * 100, brl: h.brl != null && h.res ? +(h.brl * res / h.res).toFixed(2) : null }); });
+    const pos = {}; let presos = 0;
+    for (const [m, p] of Object.entries(v.pos || {})) { const n = (p.partes || []).length, custo = p.custo + n * rede, valor = p.valor != null ? p.valor - rede : null;
+      pos[m] = Object.assign({}, p, { custo, valor, aluguel:alug, pct: valor != null ? (valor / custo - 1) * 100 : p.pct }); presos += custo + alug; }
+    const dias = (v.dias || []).map(d => { const hs = hist.filter(h => new Date(h.t1).toLocaleDateString('pt-BR') === d.dia); if (!hs.length) return d;
+      const res = hs.reduce((a, h) => a + h.res, 0); return Object.assign({}, d, { res, brl: d.brl != null && d.res ? +(d.brl * res / d.res).toFixed(2) : null }); });
+    T.cfg = Object.assign({}, PADRAO, v.cfg || {}, { taxaRedeSOL:rede, aluguelSOL:alug });
+    T.inicio = v.inicio; T.solInicial = 4.1; T.ult = v.ult || {}; T.dias = dias; T.diaAtual = v.diaAtual || T.diaAtual;
+    T.hist = hist; T.pos = pos; T.saldo = 4.1 + hist.reduce((a, h) => a + h.res, 0) - presos; T.pico = null; T.ddMax = null; T.ajustarBanca = true;
+    T.eventos = [{ t:Date.now(), txt:`Teste da v4.5 trazido com banca de ${4.1} SOL, taxa da rede (${rede} SOL por transação) e aluguel da conta da moeda (${alug} SOL, volta ao vender): ${hist.length} fechadas e ${Object.keys(pos).length} abertas`, cor:'#3b82f6' }].concat(v.eventos || []).slice(0, 60);
+  return T; }
+(function migrar(){
+  try {
+    if (localStorage.getItem(CHAVE)) return;
+    const ler = k => { try { const o = JSON.parse(localStorage.getItem(k) || 'null'); return o && o.solInicial != null ? o : null; } catch(e) { return null; } };
+    const n = o => o ? (o.hist || []).length + Object.keys(o.pos || {}).length : -1;
+    const v46 = ler('roboQuedaProjetoV46'), v45 = ler('roboQuedaProjetoV45'), v43 = ler('roboQuedaProjetoV43');
+    let o = null, de = '';
+    if (v46 && n(v46) >= n(v45) && n(v46) >= n(v43)) { o = v46; de = 'v4.6'; }
+    else if (v45 && n(v45) >= n(v43)) { o = para46(v45); de = 'v4.5'; }
+    else if (v43) { o = para46(para45(v43)); de = 'v4.3/v4.4'; }
+    if (!o) return;
+    o.cfg = Object.assign({}, PADRAO, o.cfg || {});
+    o.eventos = [{ t:Date.now(), txt:`Teste da ${de} trazido para a v4.7.1: ${(o.hist || []).length} fechadas e ${Object.keys(o.pos || {}).length} abertas — drawdown sendo refeito pelas velas de 1 h`, cor:'#3b82f6' }].concat((o.eventos || []).filter(e => !/trazido|continuado|refeito/.test(e.txt))).slice(0, 60);
+    localStorage.setItem(CHAVE, JSON.stringify(o)); S = carregar();
+  } catch (e) { console.log('migração', e); }
+})();
+function carregar(){ try { const s = JSON.parse(localStorage.getItem(CHAVE)); if (s && s.cfg) { s.cfg = Object.assign({}, PADRAO, s.cfg); return s; } } catch(e){} return novo(); }
+function novo(cfg){ return { cfg:Object.assign({}, PADRAO, cfg||{}), ligado:true, inicio:Date.now(), solInicial:null, saldo:null, pos:{}, hist:[], ult:{}, eventos:[], dias:[], diaAtual:new Date().toDateString() }; }
+function salvar(){ try { localStorage.setItem(CHAVE, JSON.stringify({ ...S, eventos:S.eventos.slice(0,60), hist:S.hist.slice(0,500) })); } catch(e){} }
+let SOLBRL = 0, SOLUSD = 0, erros = 0;
+const M = {};   // moedas vigiadas: mint -> {mint,s,mcap,liq,idade,site,x,tg,pool,p,tP,hi24,tHi,velas}
+
+const fmtR = n => (n<0?'-':'') + 'R$ ' + Math.abs(n).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmtU = n => { const a=Math.abs(n); return '$' + (a>=1e6?(a/1e6).toFixed(2)+'M':a>=1e3?(a/1e3).toFixed(1)+'K':a.toFixed(a<1?6:0)); };
+const fmtP = p => p >= 1 ? '$' + p.toFixed(3) : '$' + p.toPrecision(4);
+const hora = t => new Date(t).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+const corDir = n => n>0?COR.up:n<0?COR.down:COR.neutro;
+const ev = (txt, cor, mint) => { S.eventos.unshift({ t:Date.now(), txt, cor, mint }); if (S.eventos.length>60) S.eventos.pop(); };
+const espera = ms => new Promise(r => setTimeout(r, ms));
+const links = m => `<a class="lk" href="https://gmgn.ai/sol/token/${m}" target="_blank" style="color:#3b82f6">[GMGN]</a><a class="lk" href="https://jup.ag/tokens/${m}" target="_blank" style="color:#22d3ee">[Jupiter]</a><a class="lk" href="https://dexscreener.com/solana/${m}" target="_blank" style="color:#9ca3af">[DexScreener]</a>`;
+function bip(f){ try{ const ac=new AudioContext(),o=ac.createOscillator(),g=ac.createGain(); o.frequency.value=f; g.gain.value=0.12; o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime+0.15);}catch(e){} }
+
+async function cotacao(){
+  try { SOLBRL = +(await (await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLBRL')).json()).price || 0; } catch(e){}
+  try { SOLUSD = +(await (await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT')).json()).price || 0; } catch(e){}
+  // reserva: preço do SOL na Jupiter e dólar pela AwesomeAPI
+  if (!(SOLUSD > 0)) try { const j = await (await fetch('https://lite-api.jup.ag/price/v3?ids=So11111111111111111111111111111111111111112')).json(); SOLUSD = +j['So11111111111111111111111111111111111111112'].usdPrice || 0; } catch(e){}
+  if (!(SOLBRL > 0) && SOLUSD > 0) try { const j = await (await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL')).json(); const usd = +j.USDBRL.bid; if (usd > 0) SOLBRL = SOLUSD * usd; } catch(e){}
+  if (!(SOLBRL > 0) && SOLUSD > 0) try { const j = await (await fetch('https://open.er-api.com/v6/latest/USD')).json(); const usd = +j.rates.BRL; if (usd > 0) SOLBRL = SOLUSD * usd; } catch(e){}
+  if (!(SOLBRL > 0) && SOLUSD > 0) try { const j = await (await fetch('https://api.frankfurter.app/latest?from=USD&to=BRL')).json(); const usd = +j.rates.BRL; if (usd > 0) SOLBRL = SOLUSD * usd; } catch(e){}
+  if (SOLBRL > 0 && S.ajustarBanca) { S.cfg.bancaBRL = Math.round(S.solInicial * SOLBRL); delete S.ajustarBanca; salvar(); }
+  if (SOLBRL > 0 && S.solInicial == null) { S.solInicial = S.cfg.bancaBRL / SOLBRL; S.saldo = S.solInicial; ev(`Banca: ${fmtR(S.cfg.bancaBRL)} = ${S.solInicial.toFixed(2)} SOL`, COR.info); salvar(); }
+}
+// cotação real da Jupiter (quanto sai de verdade num swap agora)
+async function jup(entra, sai, qtd){
+  const r = await fetch(`https://lite-api.jup.ag/swap/v1/quote?inputMint=${entra}&outputMint=${sai}&amount=${Math.floor(qtd)}&slippageBps=1000&restrictIntermediateTokens=true`);
+  if (!r.ok) throw new Error('Jupiter ' + r.status);
+  const j = await r.json(); if (!j.outAmount) throw new Error('sem rota');
+  return { out:+j.outAmount, rota:(j.routePlan || []).map(x => x.swapInfo.label).join(' > ') };
+}
+const DEC = {};
+async function decimais(mint){ if (DEC[mint] != null) return DEC[mint];
+  try { const r = await fetch('https://lite-api.jup.ag/tokens/v2/search?query=' + mint); const a = await r.json(); const t = (a || []).find(x => x.id === mint); if (t) return DEC[mint] = t.decimals; } catch(e){}
+  return DEC[mint] = 6; }
+
+// ---------------- moedas: listas da Jupiter ----------------
+let passoLista = 0, ultLista = 0;
+async function buscarMoedas(){
+  const c = S.cfg, listas = ['toptraded/24h', 'toporganicscore/24h', 'toptrending/24h', 'toptraded/6h'];
+  const r = await fetch('https://lite-api.jup.ag/tokens/v2/' + listas[passoLista++ % listas.length] + '?limit=100'); if (!r.ok) return;
+  const a = await r.json(); let novos = 0;
+  for (const t of a || []) {
+    const idade = t.firstPool && t.firstPool.createdAt ? (Date.now() - Date.parse(t.firstPool.createdAt)) / 864e5 : 0;
+    const proj = !!(t.website || t.twitter || t.telegram);
+    if (/USD|^W?SOL$|SOL$|BTC|ETH|^JUP|^JLP/i.test(t.symbol || '')) continue;
+    const passa = idade >= c.idadeMinDias && t.mcap >= c.mcMin && t.mcap <= c.mcMax && (t.liquidity || 0) >= c.liqMin && (!c.exigeProjeto || proj);
+    const m = M[t.id];
+    if (m) { Object.assign(m, { mcap:t.mcap, liq:t.liquidity || 0, idade, passa }); continue; }
+    if (!passa || Object.keys(M).length >= 40) continue;
+    M[t.id] = { mint:t.id, s:t.symbol || '?', mcap:t.mcap, liq:t.liquidity || 0, idade, site:!!t.website, x:!!t.twitter, tg:!!t.telegram, passa, dec:t.decimals, p:0, tP:0 };
+    DEC[t.id] = t.decimals; novos++;
+  }
+  if (novos) ev(`${novos} moeda(s) com projeto entraram na vigia`, COR.neutro);
+}
+function vigiaPosicoes(){ for (const p of Object.values(S.pos)) if (!M[p.mint]) M[p.mint] = { mint:p.mint, s:p.s, mcap:0, liq:0, idade:0, site:false, x:false, tg:false, passa:false, dec:p.dec, p:0, tP:0 }; }
+// preço ao vivo (Jupiter, até 50 por vez)
+async function precos(){
+  vigiaPosicoes();
+  const ks = Object.keys(M).concat(Object.keys(S.pos).filter(m => !M[m])).slice(0, 50); if (!ks.length) return;
+  const r = await fetch('https://lite-api.jup.ag/price/v3?ids=' + ks.join(',')); if (!r.ok) return;
+  const j = await r.json();
+  for (const [m, x] of Object.entries(j || {})) { const w = M[m]; if (w && x && x.usdPrice) { w.p = x.usdPrice; w.tP = Date.now(); w.hiVivo = Math.max(w.hiVivo || 0, x.usdPrice); } }
+}
+// máxima de 24 h: velas de 1 h do GeckoTerminal (pool principal da moeda)
+let geckoLivre = 0;
+async function gecko(u){ if (Date.now() < geckoLivre) return null; geckoLivre = Date.now() + 7000;
+  const r = await fetch('https://api.geckoterminal.com/api/v2' + u); if (r.status === 429) { geckoLivre = Date.now() + 60000; return null; } if (!r.ok) return null; return r.json(); }
+async function poolPrincipal(w){
+  try { const r = await fetch('https://api.dexscreener.com/latest/dex/tokens/' + w.mint); const t = await r.text(); if (t[0] !== '{') return null;
+    const ps = (JSON.parse(t).pairs || []).filter(p => p.chainId === 'solana' && p.baseToken && p.baseToken.address === w.mint);
+    if (!ps.length) return null; ps.sort((a, b) => ((b.liquidity && b.liquidity.usd) || 0) - ((a.liquidity && a.liquidity.usd) || 0)); return { pool:ps[0].pairAddress, px:+ps[0].priceUsd || 0 }; } catch(e) { return null; } }
+async function maxima24(){
+  const w = Object.values(M).filter(w => (w.passa || S.pos[w.mint]) && !w.ruim).sort((a, b) => (a.tHi || 0) - (b.tHi || 0))[0];
+  if (!w || (w.tHi && Date.now() - w.tHi < 30 * 60000)) return;
+  if (!w.pool) { const pp = await poolPrincipal(w); if (!pp) { w.tHi = Date.now(); w.hi24 = 0; return; }
+    // o preço da Jupiter tem que bater com o do DexScreener; se não bater, a moeda é ignorada
+    if (!w.p || !pp.px || Math.abs(pp.px / w.p - 1) > 0.15) { w.ruim = true; ev(`${w.s}: preço da Jupiter (${w.p ? fmtP(w.p) : '—'}) não bate com o DexScreener (${pp.px ? fmtP(pp.px) : '—'}) — moeda ignorada`, COR.aviso, w.mint); return; }
+    w.pool = pp.pool; }
+  const j = await gecko(`/networks/solana/pools/${w.pool}/ohlcv/hour?aggregate=1&limit=25&currency=usd&token=${w.mint}`); if (!j) return;
+  const v = (j.data && j.data.attributes.ohlcv_list) || []; if (!v.length) { w.tHi = Date.now(); return; }
+  const ultimo = +v[0][4], hi = Math.max(...v.slice(0, 24).map(k => +k[2]));
+  // CONFERÊNCIA: o último preço das velas tem que bater com o preço da Jupiter (diferença até 15%); senão a máxima não vale
+  if (!w.p || !ultimo || Math.abs(ultimo / w.p - 1) > 0.15) {
+    w.falhasHi = (w.falhasHi || 0) + 1; w.hi24 = 0; w.tHi = Date.now(); w.pool = null;
+    if (w.falhasHi >= 2) { w.ruim = true; ev(`${w.s}: preço das velas não bate com a Jupiter — moeda ignorada (evita erro de máxima)`, COR.aviso, w.mint); }
+    return; }
+  const J = Math.max(1, Math.min(12, Math.round(S.cfg.volJanelaH || 6)));   // v4.11: volume das velas de 1 h fechadas (últimas J h × J h anteriores)
+  w.volA = v.slice(1, 1 + J).reduce((s, k) => s + (+k[5] || 0), 0); w.volB = v.slice(1 + J, 1 + 2 * J).reduce((s, k) => s + (+k[5] || 0), 0); w.tVol = Date.now();
+  w.falhasHi = 0; w.hi24 = hi; w.lo24 = Math.min(...v.slice(0, 24).map(k => +k[3])); w.tHi = Date.now(); w.hiVivo = 0;
+}
+const hiAtual = w => Math.max(w.hi24 || 0, w.hiVivo || 0);
+
+// ---------------- DRAWDOWN DESDE O INÍCIO: refeito pelas velas de 1 h de cada moeda (mínima de cada hora = pior momento) ----------------
+const POOL_SOL = '58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2';   // SOL/USDC (Raydium) para o preço do SOL hora a hora
+const H1 = 3600000, diaBR = t => new Date(t).toLocaleDateString('pt-BR');
+let ddStatus = '';
+function moedasDoTeste(){ const m = {}; for (const h of S.hist) m[h.mint] = m[h.mint] || { mint:h.mint, s:h.s, t0:h.t0 }; for (const p of Object.values(S.pos)) m[p.mint] = m[p.mint] || { mint:p.mint, s:p.s, t0:p.t0 }; return Object.values(m); }
+async function velasDesde(pool, token, t0){ const horas = Math.min(1000, Math.ceil((Date.now() - t0) / H1) + 3);
+  const j = await gecko(`/networks/solana/pools/${pool}/ohlcv/hour?aggregate=1&limit=${horas}&currency=usd&token=${token}`); if (!j) return null;
+  const v = (j.data && j.data.attributes.ohlcv_list) || []; const o = {}; v.forEach(k => { o[k[0] * 1000] = [+k[3], +k[4]]; }); return o; }   // hora -> [mínima, fechamento]
+async function refazDD(){
+  S.dd = S.dd || { velas:{}, ruins:{}, sol:null, tVelas:0 };
+  const D = S.dd, lista = moedasDoTeste(); if (!lista.length) return;
+  const t0 = Math.min(...lista.map(x => x.t0));
+  // velas das moedas abertas são atualizadas a cada 1 h; as das fechadas só precisam uma vez
+  const precisa = lista.filter(x => !D.ruins[x.mint] && (!D.velas[x.mint] || (S.pos[x.mint] && Date.now() - (D.velas[x.mint].t || 0) > H1)));
+  if (!D.sol || Date.now() - D.sol.t > H1) { const v = await velasDesde(POOL_SOL, 'So11111111111111111111111111111111111111112', t0); if (v) D.sol = { t:Date.now(), v }; return; }
+  if (precisa.length) { const x = precisa[0]; ddStatus = `refazendo drawdown: velas de ${x.s} (${lista.length - precisa.length}/${lista.length})`;
+    const w = M[x.mint] || {}; let pool = w.pool; if (!pool) { const pp = await poolPrincipal({ mint:x.mint }); if (!pp) { D.ruins[x.mint] = 'sem pool'; return; } pool = pp.pool; }
+    const v = await velasDesde(pool, x.mint, x.t0); if (!v) return;
+    // conferência: a vela da hora da 1ª compra tem que bater com o preço pago (até 30%)
+    const p = S.pos[x.mint] || S.hist.find(h => h.mint === x.mint), pr = p.partes[0], k = v[Math.floor(pr.t / H1) * H1];
+    if (k && Math.abs(k[1] / pr.pPago - 1) > 0.3 && Math.abs(k[0] / pr.pPago - 1) > 0.3) { D.ruins[x.mint] = 'velas não batem com o preço pago'; return; }
+    D.velas[x.mint] = { t:Date.now(), v }; salvar(); return; }
+  ddStatus = '';
+  calculaCurva();
+}
+function calculaCurva(){
+  const D = S.dd; if (!D || !D.sol) return;
+  const solH = t => { const k = D.sol.v[t]; return k ? k[1] : (SOLUSD || 0); };
+  const ops = S.hist.map(h => ({ ...h, fechou:true })).concat(Object.values(S.pos).map(p => ({ ...p, fechou:false })));
+  const ini = Math.floor(Math.min(S.inicio, ...ops.map(o => o.t0)) / H1) * H1, fim = Math.floor(Date.now() / H1) * H1;
+  const prio = S.cfg.prioridadeSOL + S.cfg.taxaRedeSOL, curva = [];
+  for (let h = ini; h <= fim; h += H1) {
+    let eq = S.solInicial, fimH = h + H1;
+    for (const o of ops) {
+      if (o.fechou && o.t1 < fimH) { eq += o.res; continue; }        // já vendida nesta hora: resultado realizado
+      const partes = o.partes.filter(x => x.t < fimH); if (!partes.length) continue;
+      const vel = D.velas[o.mint] && D.velas[o.mint].v[h], sH = solH(h);
+      const custo = partes.reduce((a, x) => a + x.sol + prio, 0);
+      if (!vel || !sH) { continue; }                                   // sem vela nesta hora: conta como empatado
+      const valor = partes.reduce((a, x) => a + x.sol * (solH(Math.floor(x.t / H1) * H1) || sH) / sH * vel[0] / x.pPago, 0) * 0.99 - prio;   // 1% de taxa+impacto na venda
+      eq += valor - custo;
+    }
+    curva.push([h, eq]);
+  }
+  let pico = S.solInicial, dd = { pct:0, sol:0, t:0 }; const dias = {};
+  curva.forEach(([h, eq]) => { if (eq > pico) pico = eq; const d = (eq / pico - 1) * 100; if (d < dd.pct) dd = { pct:d, sol:eq - pico, t:h };
+    const k = diaBR(h), x = dias[k] || (dias[k] = { pico:eq, pct:0, sol:0 }); if (eq > x.pico) x.pico = eq; const dd2 = (eq / x.pico - 1) * 100; if (dd2 < x.pct) { x.pct = dd2; x.sol = eq - x.pico; } });
+  D.curva = { t:Date.now(), dd, dias, picoEq:pico, horas:curva.length };
+  if (!S.pico || pico > S.pico) S.pico = pico;
+  if (S.ddMax == null || dd.pct < S.ddMax) { S.ddMax = dd.pct; S.ddMaxSol = dd.sol; S.ddMaxT = dd.t; }
+  S.ddDias = S.ddDias || {}; for (const [k, x] of Object.entries(dias)) { const a = S.ddDias[k]; if (!a || x.pct < a.pct) S.ddDias[k] = { pct:x.pct, sol:x.sol }; }
+  salvar();
+}
+
+// ---------------- compra em partes / venda ----------------
+const ocupado = {};
+async function comprar(w, parte, sol){
+  const c = S.cfg; if (ocupado[w.mint]) return; ocupado[w.mint] = true;
+  try {
+    const nova = !S.pos[w.mint], alug = nova ? c.aluguelSOL : 0, custo = sol + c.prioridadeSOL + c.taxaRedeSOL; if (S.saldo < custo + alug) return;
+    await espera(c.atrasoExecMs);
+    const q = await jup(SOLM, w.mint, sol * 1e9);
+    let dec = w.dec != null ? w.dec : await decimais(w.mint), tok = q.out / Math.pow(10, dec), pPago = sol * SOLUSD / tok;
+    // conferência: o preço pago tem que bater com o preço da moeda (até 25% de diferença); senão NÃO compra
+    if (w.p && Math.abs(pPago / w.p - 1) > 0.25) { ev(`NÃO comprou ${w.s}: preço da cotação (${fmtP(pPago)}) não bate com o preço da moeda (${fmtP(w.p)})`, COR.aviso, w.mint); return; }
+    S.saldo -= custo + alug;
+    const p = S.pos[w.mint] || (S.pos[w.mint] = { mint:w.mint, s:w.s, t0:Date.now(), hiRef:hiAtual(w), raw:0, tok:0, custo:0, partes:[], dec, aluguel:alug });
+    p.raw += q.out; p.tok += tok; p.custo += custo; p.partes.push({ parte, t:Date.now(), sol, pPago, quedaPct:(w.p / p.hiRef - 1) * 100, mc:w.mcap });
+    p.medio = p.custo * SOLUSD / p.tok;
+    ev(`COMPROU ${w.s} — parte ${parte}: ${sol} SOL a ${fmtP(pPago)} (${((w.p / p.hiRef - 1) * 100).toFixed(0)}% da máxima 24 h) · preço médio ${fmtP(p.medio)} · investido ${p.custo.toFixed(2)} SOL · MC ${fmtU(w.mcap)}`, COR.info, w.mint);
+    bip(880); salvar();
+  } catch (e) { ev(`Não comprou ${w.s}: ${e.message}`, COR.aviso, w.mint); }
+  finally { ocupado[w.mint] = false; }
+}
+async function avaliar(){
+  const c = S.cfg;
+  for (const w of Object.values(M)) {
+    if (!w.p || !w.hi24 || Date.now() - w.tP > 120000) continue;
+    const p = S.pos[w.mint];
+    if (p) {   // já tem posição: compra as próximas partes se continuar caindo (referência = máxima da 1ª compra)
+      const n = p.partes.length, q = (w.p / p.hiRef - 1) * 100;
+      const qs = [0, c.queda2, c.queda3, c.queda4], ps = [0, c.parte2, c.parte3, c.parte4];
+      if (n >= 1 && n <= 3 && q <= -qs[n]) {
+        if (c.volDesde > 0 && n + 1 >= c.volDesde) {   // v4.11: essa parte só entra se o volume estiver subindo (tem comprador); volume caindo = segura
+          const temVol = w.tVol && Date.now() - w.tVol < 3 * 3600000;
+          if (!temVol || !(w.volA > w.volB)) {
+            if (p.segurou !== n + 1) { p.segurou = n + 1; ev(`SEGUROU a ${n + 1}ª parte de ${w.s}: bateu −${qs[n]}% mas ${temVol ? `o volume está caindo (últimas ${c.volJanelaH} h ${fmtU(w.volA)} × anteriores ${fmtU(w.volB)})` : 'ainda sem o volume das velas'} — compra quando o volume subir`, COR.neutro, w.mint); salvar(); }
+            continue; }
+        }
+        await comprar(w, n + 1, ps[n]);
+      }
+      continue;
+    }
+    if (!w.passa || w.ruim) continue;
+    if (Object.keys(S.pos).length >= c.maxMoedas) continue;
+    if (S.ult[w.mint] && Date.now() - S.ult[w.mint] < c.esperaH * 3600000) continue;
+    const q = (w.p / hiAtual(w) - 1) * 100;
+    if (!(c.esperaSinal > 0)) { if (q <= -c.queda1 && q >= -85) await comprar(w, 1, c.parte1); continue; }   // abaixo de −85% é dado errado ou moeda morrendo: não entra
+    // v4.10: o sinal só marca o preço; a 1ª parte entra se cair mais esperaSinal% a partir do preço marcado
+    S.sinais = S.sinais || {};
+    const sn = S.sinais[w.mint];
+    if (sn) {
+      if (c.esperaSinalH > 0 && Date.now() - sn.t > c.esperaSinalH * 3600000) { delete S.sinais[w.mint]; ev(`SINAL vencido em ${w.s}: não caiu mais ${c.esperaSinal}% em ${c.esperaSinalH} h`, COR.neutro, w.mint); continue; }
+      if (w.p <= sn.px * (1 - c.esperaSinal / 100) && (w.p / sn.hi - 1) * 100 >= -85) {
+        const hi = sn.hi; delete S.sinais[w.mint];
+        await comprar(w, 1, c.parte1);
+        if (S.pos[w.mint] && S.pos[w.mint].partes.length === 1) S.pos[w.mint].hiRef = hi;   // próximas partes contam da máxima do sinal
+      }
+      continue;
+    }
+    if (q <= -c.queda1 && q >= -85) { S.sinais[w.mint] = { t:Date.now(), px:w.p, hi:hiAtual(w), s:w.s };
+      ev(`SINAL em ${w.s}: caiu ${(-q).toFixed(0)}% da máxima — marcou ${fmtP(w.p)}; compra a 1ª parte se cair mais ${c.esperaSinal}% (${fmtP(w.p * (1 - c.esperaSinal / 100))})`, COR.neutro, w.mint); }
+  }
+}
+let conferindo = false;
+async function conferir(){
+  if (conferindo) return; conferindo = true;
+  try { const c = S.cfg;
+    for (const p of Object.values(S.pos)) {
+      try { const q = await jup(p.mint, SOLM, p.raw); p.valor = q.out / 1e9 - c.prioridadeSOL - c.taxaRedeSOL; p.pct = (p.valor / p.custo - 1) * 100; p.tV = Date.now(); p.rota = q.rota; p.erro = '';
+        const w = M[p.mint], h = (Date.now() - p.t0) / 3600000;
+        let motivo = '';
+        if (p.pct >= c.alvo) motivo = 'alvo';
+        else if (c.stop > 0 && p.pct <= -c.stop) motivo = 'stop';
+        else if (p.partes.length >= 4 && (Date.now() - (p.partes[3].t || p.t0)) / 3600000 >= c.tempoMaxH) motivo = 'tempo';   // v4.8: só depois da 4ª parte
+        else if (w && w.liq && w.liq < c.liqFuga) motivo = 'liquidez sumiu';
+        if (motivo) await vender(p, motivo);
+      } catch (e) { p.erro = e.message; }
+      await espera(400);
+    }
+  } finally { conferindo = false; }
+}
+async function vender(p, motivo){
+  const c = S.cfg; await espera(c.atrasoExecMs);
+  let q; try { q = await jup(p.mint, SOLM, p.raw); } catch (e) { p.erro = 'venda: ' + e.message; return; }
+  const v = q.out / 1e9 - c.prioridadeSOL - c.taxaRedeSOL, res = v - p.custo, pct = (v / p.custo - 1) * 100, pSaida = v * SOLUSD / p.tok;
+  S.saldo += v + (p.aluguel || 0);   // aluguel da conta volta ao fechar a conta da moeda
+  S.hist.unshift({ s:p.s, mint:p.mint, t0:p.t0, t1:Date.now(), horas:(Date.now() - p.t0) / 3600000, motivo, partes:p.partes, custo:p.custo, venda:v, res, pct, medio:p.medio, pSaida, hiRef:p.hiRef, solusd:SOLUSD, brl:SOLBRL ? +(res * SOLBRL).toFixed(2) : null });
+  delete S.pos[p.mint]; S.ult[p.mint] = Date.now();
+  ev(`VENDEU ${p.s} (${motivo}) depois de ${((Date.now() - p.t0) / 3600000).toFixed(1)} h · ${p.partes.length} parte(s) · médio ${fmtP(p.medio)} → saída ${fmtP(pSaida)} · ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% (${res >= 0 ? '+' : ''}${res.toFixed(3)} SOL)`, corDir(res), p.mint);
+  bip(res >= 0 ? 1200 : 300); salvar();
+}
+// ---------------- resultado do dia ----------------
+const doDia = dia => { const H = S.hist.filter(h => new Date(h.t1).toDateString() === dia); return { ops:H.length, ganhos:H.filter(h => h.res > 0).length, res:H.reduce((a, h) => a + h.res, 0) }; };
+function viraDia(){ const hoje = new Date().toDateString(); if (S.diaAtual === hoje) return; const r = doDia(S.diaAtual);
+  S.dias.unshift({ dia:new Date(S.diaAtual).toLocaleDateString('pt-BR'), ...r, brl:SOLBRL ? +(r.res * SOLBRL).toFixed(2) : null }); S.diaAtual = hoje; salvar(); }
+
+// ---------------- laço ----------------
+let ultCot = 0, ultPreco = 0, ultConf = 0, ocupadoLaco = false;
+const relogio = new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(1),5000)'], { type:'text/javascript' })));
+relogio.onmessage = async () => {
+  if (ocupadoLaco) return; ocupadoLaco = true;
+  try {
+    if (Date.now() - ultCot > 60000) { ultCot = Date.now(); await cotacao(); viraDia(); }
+    if (S.ligado) {
+      if (Date.now() - ultLista > 120000) { ultLista = Date.now(); try { await buscarMoedas(); } catch(e) { erros++; } }
+      if (Date.now() - ultPreco > 20000) { ultPreco = Date.now(); try { await precos(); } catch(e) { erros++; } }
+      try { await maxima24(); } catch(e) { erros++; }
+      try { await refazDD(); } catch(e) { erros++; }
+      await avaliar();
+      if (Date.now() - ultConf > 30000 && Object.keys(S.pos).length) { ultConf = Date.now(); await conferir(); }
+      salvar();
+    }
+  } catch (e) { erros++; } finally { ocupadoLaco = false; desenha(); }
+};
+
+// ---------------- tela ----------------
+function desenha(){
+  const c = S.cfg, partesCfg = [c.parte1, c.parte2, c.parte3, c.parte4], quedasCfg = [c.queda1, c.queda2, c.queda3, c.queda4];
+  const P = Object.values(S.pos), H = S.hist;
+  const aberto = P.reduce((a, p) => a + (p.valor != null ? p.valor : p.custo), 0), emJogo = P.reduce((a, p) => a + p.custo, 0);
+  const alugPreso = P.reduce((a, p) => a + (p.aluguel || 0), 0), tot = (S.saldo || 0) + aberto + alugPreso, res = S.solInicial != null ? tot - S.solInicial : 0, resAb = aberto - emJogo;
+  if (S.solInicial != null && tot > 0) { if (!S.pico || tot > S.pico) S.pico = tot; const ddA = (tot / S.pico - 1) * 100; if (S.ddMax == null || ddA < S.ddMax) { S.ddMax = ddA; S.ddMaxSol = tot - S.pico; S.ddMaxT = Date.now(); } }
+  const flPos = P.reduce((a, p) => a + Math.max(0, (p.valor || p.custo) - p.custo), 0), flNeg = P.reduce((a, p) => a + Math.min(0, (p.valor || p.custo) - p.custo), 0);
+  const taxasCiclo = 5 * (c.prioridadeSOL + c.taxaRedeSOL) + c.aluguelSOL;   // 4 compras + 1 venda + conta da moeda
+  const somaPartes = partesCfg.reduce((a, x) => a + x, 0) + taxasCiclo, margemTot = c.maxMoedas * somaPartes;
+  const restoAbertas = P.reduce((a, p) => a + partesCfg.slice(p.partes.length).reduce((b, x) => b + x + c.prioridadeSOL + c.taxaRedeSOL, 0), 0);
+  const precisaAinda = restoAbertas + Math.max(0, c.maxMoedas - P.length) * somaPartes, folga = (S.saldo || 0) - precisaAinda;
+  const ddAgora = S.pico ? (tot / S.pico - 1) * 100 : 0;
+  const kHoje = diaBR(Date.now()); S.ddDias = S.ddDias || {};
+  if (S.solInicial != null && tot > 0) { if (!S.ddVivoDia || S.ddVivoDia.dia !== kHoje) S.ddVivoDia = { dia:kHoje, pico:tot };
+    if (tot > S.ddVivoDia.pico) S.ddVivoDia.pico = tot; const dH = (tot / S.ddVivoDia.pico - 1) * 100, a = S.ddDias[kHoje];
+    if (!a || dH < a.pct) S.ddDias[kHoje] = { pct:dH, sol:tot - S.ddVivoDia.pico }; }
+  const ddHoje = S.ddDias[kHoje] || { pct:0, sol:0 };
+  // drawdown só das fechadas (dinheiro realizado), recalculado do histórico
+  let eq = 0, pk = 0, ddF = 0; H.slice().reverse().forEach(x => { eq += x.res; if (eq > pk) pk = eq; const d = S.solInicial ? (eq - pk) / (S.solInicial + pk) * 100 : 0; if (d < ddF) ddF = d; });
+  const g = H.filter(x => x.res > 0).length, wr = H.length ? g / H.length * 100 : 0, resFech = H.reduce((a, x) => a + x.res, 0);
+  const hoje = doDia(new Date().toDateString()), R = v => SOLBRL ? fmtR(v * SOLBRL) : v.toFixed(3) + ' SOL', sg = v => (v >= 0 ? '+' : '');
+  document.getElementById('status').innerHTML = `${S.ligado ? '<span style="color:' + COR.info + '">● rodando</span>' : '<span style="color:' + COR.aviso + '">● PAUSADO</span>'} · vigiando ${Object.keys(M).length} moedas (${Object.values(M).filter(w => w.hi24).length} com máxima de 24 h) · SOL ${SOLBRL ? fmtR(SOLBRL) : '—'} · teste desde ${hora(S.inicio)}${erros ? ' · ' + erros + ' falhas de leitura' : ''}`;
+  document.getElementById('bLiga').textContent = S.ligado ? '⏸ Pausar' : '▶ Ligar';
+  const card = (t, v, cor, sub, cls) => `<div class="card ${cls || ''}"><div class="t">${t}</div><div class="v ${cls === 'destaque' ? 'big' : ''}" style="color:${cor || '#e5e7eb'}">${v}</div>${sub ? '<div class="sub">' + sub + '</div>' : ''}</div>`;
+  document.getElementById('cards').innerHTML =
+    card('🎯 TAXA DE ACERTO (winrate)', H.length ? wr.toFixed(0) + '%' : '—', '#93c5fd', `${g} ganho(s) · ${H.length - g} perda(s) · ${H.length} fechada(s)`, 'destaque') +
+    card('Conta (Jupiter)', R(tot), corDir(res), `resultado ${sg(res)}${res.toFixed(3)} SOL${SOLBRL ? ' (' + sg(res) + fmtR(res * SOLBRL) + ')' : ''}`) +
+    card('✅ Fechadas (realizado)', sg(resFech) + R(resFech), corDir(resFech), `${sg(resFech)}${resFech.toFixed(3)} SOL no bolso`) +
+    card('🌊 SALDO FLUTUANTE da cesta', sg(resAb) + R(resAb), corDir(resAb), `<span style="color:${COR.up}">▲ positivo ${'+' + R(flPos)} (${P.filter(p => (p.valor || p.custo) > p.custo).length})</span> · <span style="color:${COR.down}">▼ negativo ${R(flNeg)} (${P.filter(p => (p.valor || p.custo) < p.custo).length})</span><br>${P.length}/${c.maxMoedas} moedas · em jogo ${emJogo.toFixed(2)} SOL`) +
+    card('📅 HOJE', sg(hoje.res) + R(hoje.res), corDir(hoje.res), `${hoje.ops} fechada(s) · ${hoje.ganhos} ganho(s)`) +
+    card('📉 DRAWDOWN desde o início', Math.abs(S.ddMax || 0) < 0.05 ? '0.0%' : (S.ddMax || 0).toFixed(1) + '%', COR.aviso, `${(S.ddMaxSol || 0).toFixed(3)} SOL${SOLBRL ? ' (' + fmtR((S.ddMaxSol || 0) * SOLBRL) + ')' : ''}${S.ddMaxT ? ' em ' + hora(S.ddMaxT) : ''}<br><b style="color:${COR.aviso}">hoje ${ddHoje.pct.toFixed(1)}%</b> (${ddHoje.sol.toFixed(3)} SOL) · agora ${ddAgora.toFixed(1)}% do topo<br>só fechadas ${ddF.toFixed(1)}%${ddStatus ? '<br><i>' + ddStatus + '</i>' : (S.dd && S.dd.curva ? '<br>refeito hora a hora: ' + S.dd.curva.horas + ' h' + (Object.keys(S.dd.ruins || {}).length ? ' · ' + Object.keys(S.dd.ruins).length + ' moeda(s) sem velas' : '') : '<br><i>refazendo pelas velas de 1 h…</i>')}`) +
+    card('🧮 MARGEM p/ ciclo de ' + c.maxMoedas + ' operações', margemTot.toFixed(2) + ' SOL', '#93c5fd', `${c.maxMoedas} × ${somaPartes.toFixed(2)} SOL (4 partes + taxas + conta da moeda)${SOLBRL ? ' = ' + fmtR(margemTot * SOLBRL) : ''}<br>ainda falta reservar ${precisaAinda.toFixed(2)} SOL · livre ${(S.saldo || 0).toFixed(2)} · <b style="color:${folga >= 0 ? '#93c5fd' : COR.aviso}">${folga >= 0 ? 'sobra ' + folga.toFixed(2) + ' SOL' : 'FALTA ' + (-folga).toFixed(2) + ' SOL'}</b>`) +
+    card('💰 Saldo livre', (S.saldo || 0).toFixed(2) + ' SOL', null, `para novas entradas e preço médio<br>conta das moedas presa: ${alugPreso.toFixed(4)} SOL (volta ao vender)`);
+  // ---------------- POSIÇÕES ABERTAS ----------------
+  let h = `<div class="sec">📂 POSIÇÕES ABERTAS — ${P.length}/${c.maxMoedas}</div>`;
+  if (!P.length) h += `<div class="vazio">Nenhuma. Esperando moeda com projeto cair ${c.queda1}% ou mais da máxima de 24 h.</div>`;
+  else {
+    h += `<table class="tb"><tr><th>Moeda</th><th>Entradas (quanto entrou em cada parte)</th><th class="n">Investido</th><th class="n">1ª entrada</th><th class="n">Preço médio</th><th class="n">Agora</th><th class="n">Resultado (R$)</th><th>♻ Recuperação (próxima parte)</th><th class="n">Tempo</th></tr>`;
+    P.forEach(p => { const w = M[p.mint] || {}, hrs = (Date.now() - p.t0) / 3600000, n = p.partes.length, pct = p.pct || 0;
+      const tags = partesCfg.map((sol, k) => { const x = p.partes[k]; return x ? `<span class="tag ok">${k + 1}ª ${x.sol.toFixed(2)} SOL · ${fmtP(x.pPago)} · ${x.quedaPct.toFixed(0)}%</span>` : `<span class="tag esp">${k + 1}ª ${sol.toFixed(2)} SOL em −${quedasCfg[k]}%</span>`; }).join('');
+      const px1 = p.partes[0] ? p.partes[0].pPago : p.medio, mudouMedio = px1 ? (p.medio / px1 - 1) * 100 : 0;
+      let rec;
+      if (n >= 4) rec = `<span class="sub">todas as 4 partes usadas</span>`;
+      else { const alvoP = p.hiRef * (1 - quedasCfg[n] / 100), falta = w.p ? (alvoP / w.p - 1) * 100 : null;
+        const tokNovo = partesCfg[n] * SOLUSD / alvoP, medioNovo = (p.custo * SOLUSD + partesCfg[n] * SOLUSD) / (p.tok + tokNovo);
+        rec = `<span class="rec">${n + 1}ª parte: ${partesCfg[n].toFixed(2)} SOL</span> a ${fmtP(alvoP)} (−${quedasCfg[n]}% da máx.)<br><span class="sub">${falta != null ? 'falta ' + falta.toFixed(1) + '% · ' : ''}médio iria de ${fmtP(p.medio)} → ${fmtP(medioNovo)} (${((medioNovo / p.medio - 1) * 100).toFixed(1)}%)</span>${c.volDesde > 0 && n + 1 >= c.volDesde ? '<br><span class="sub">volume ' + c.volJanelaH + ' h: ' + (w.tVol ? (w.volA > w.volB ? '<b style="color:' + COR.info + '">subindo — pode fazer o médio</b>' : '<b style="color:' + COR.aviso + '">caindo — segura o preço médio</b>') + ' (' + fmtU(w.volA || 0) + ' × ' + fmtU(w.volB || 0) + ')' : 'aguardando as velas') + '</span>' : ''}`; }
+      h += `<tr><td><b>${p.s}</b><br>${links(p.mint)}<br><span class="sub">MC ${w.mcap ? fmtU(w.mcap) : '—'}</span></td>
+        <td>${tags}</td>
+        <td class="n"><b>${p.custo.toFixed(2)} SOL</b><br><span class="sub">${n} de 4 partes</span></td>
+        <td class="n">${fmtP(px1)}</td>
+        <td class="n"><b>${fmtP(p.medio)}</b>${n > 1 ? `<br><span class="sub">${mudouMedio.toFixed(1)}% vs 1ª</span>` : ''}</td>
+        <td class="n">${w.p ? fmtP(w.p) : '—'}${w.p && p.hiRef ? `<br><span class="sub">${((w.p / p.hiRef - 1) * 100).toFixed(0)}% da máx.</span>` : ''}</td>
+        <td class="n" style="color:${corDir(pct)}"><b>${pct >= 0 ? '▲ +' : '▼ '}${pct.toFixed(1)}%</b>${SOLBRL ? `<br><b>${sg((p.valor || p.custo) - p.custo)}${fmtR(((p.valor || p.custo) - p.custo) * SOLBRL)}</b>` : ''}<br><span class="sub">${sg((p.valor || p.custo) - p.custo)}${((p.valor || p.custo) - p.custo).toFixed(3)} SOL · alvo +${c.alvo}%</span></td>
+        <td>${rec}</td>
+        <td class="n">${hrs.toFixed(1)} h<br><span class="sub">${p.partes.length >= 4 ? `fecha em ${Math.max(0, c.tempoMaxH - (Date.now() - (p.partes[3].t || p.t0)) / 3600000).toFixed(1)} h` : `sem limite até a 4ª parte`}</span></td></tr>`; });
+    h += `</table>`; }
+  // ---------------- FECHADAS ----------------
+  h += `<div class="sec">✅ OPERAÇÕES FECHADAS — ${H.length} · <span style="color:#93c5fd">acerto ${H.length ? wr.toFixed(0) + '%' : '—'}</span> · <span style="color:${corDir(resFech)}">${sg(resFech)}${resFech.toFixed(3)} SOL${SOLBRL ? ' (' + sg(resFech) + fmtR(resFech * SOLBRL) + ')' : ''}</span></div>`;
+  if (!H.length) h += `<div class="vazio">—</div>`;
+  else {
+    h += `<table class="tb"><tr><th>Moeda</th><th>Entradas</th><th class="n">Investido</th><th class="n">1ª entrada</th><th class="n">Preço médio</th><th class="n">Saída</th><th class="n">Resultado (R$)</th><th class="n">Abriu → Fechou</th><th>Motivo</th></tr>`;
+    H.slice(0, 60).forEach(x => { const px1 = x.partes && x.partes[0] ? x.partes[0].pPago : x.medio;
+      const tags = (x.partes || []).map((y, k) => `<span class="tag ok">${k + 1}ª ${y.sol.toFixed(2)} SOL · ${fmtP(y.pPago)}</span>`).join('');
+      h += `<tr><td><b>${x.s}</b><br>${links(x.mint)}</td><td>${tags}</td><td class="n">${x.custo.toFixed(2)} SOL</td><td class="n">${fmtP(px1)}</td><td class="n"><b>${fmtP(x.medio)}</b></td><td class="n">${fmtP(x.pSaida)}</td>
+        <td class="n" style="color:${corDir(x.res)}"><b>${x.res >= 0 ? '▲ +' : '▼ '}${x.pct.toFixed(1)}%</b>${SOLBRL || x.brl != null ? `<br><b style="font-size:14px">${sg(x.res)}${fmtR(x.brl != null ? x.brl : x.res * SOLBRL)}</b>` : ''}<br><span class="sub">${sg(x.res)}${x.res.toFixed(3)} SOL</span></td>
+        <td class="n">${hora(x.t0)}<br>${hora(x.t1)} <span class="sub">(${x.horas.toFixed(1)} h)</span></td><td>${x.motivo}</td></tr>`; });
+    h += `</table>`; }
+  // ---------------- DIAS ----------------
+  h += `<div class="sec">📅 RESULTADO POR DIA</div>`;
+  { h += `<table class="tb"><tr><th>Dia</th><th class="n">Fechadas</th><th class="n">Acerto</th><th class="n">Resultado</th><th class="n">Drawdown do dia</th></tr>`;
+    const diasT = [{ dia:kHoje + ' (hoje)', chave:kHoje, ...hoje, brl:SOLBRL ? hoje.res * SOLBRL : null }].concat(S.dias.filter(d => d.dia !== kHoje).map(d => ({ ...d, chave:d.dia })));
+    diasT.slice(0, 31).forEach(d => { const x = (S.ddDias || {})[d.chave]; h += `<tr><td><b>${d.dia}</b></td><td class="n">${d.ops}</td><td class="n" style="color:#93c5fd">${d.ops ? Math.round(d.ganhos / d.ops * 100) + '%' : '—'}</td><td class="n" style="color:${corDir(d.res)}">${sg(d.res)}${d.res.toFixed(3)} SOL${d.brl != null ? ' (' + sg(d.res) + fmtR(d.brl) + ')' : ''}</td><td class="n" style="color:${COR.aviso}">${x ? x.pct.toFixed(1) + '% (' + x.sol.toFixed(3) + ' SOL)' : '—'}</td></tr>`; });
+    h += `</table>`; }
+  // ---------------- VIGIADAS ----------------
+  h += `<div class="sec">👀 MOEDAS VIGIADAS — ${Object.keys(M).length} <span class="sub" style="font-weight:400">(${c.idadeMinDias}+ dias · MC ${fmtU(c.mcMin)}–${fmtU(c.mcMax)} · liquidez ${fmtU(c.liqMin)}+ · ${c.exigeProjeto ? 'com site/X/telegram' : 'qualquer'} · partes ${partesCfg.map(x => x.toFixed(2)).join(' / ')} SOL a −${quedasCfg.join('% / −')}% da máxima de 24 h · alvo +${c.alvo}% sobre o investido)</span></div>`;
+  const ord = Object.values(M).filter(w => w.p && w.hi24 && w.passa).map(w => ({ w, q:(w.p / hiAtual(w) - 1) * 100 })).sort((a, b) => a.q - b.q).slice(0, 25);
+  if (!ord.length) h += `<div class="vazio">Carregando a máxima de 24 h das moedas (uma a cada ~7 s)…</div>`;
+  ord.forEach(({ w, q }) => { const perto = q <= -c.queda1 * 0.75, prog = Math.min(100, Math.max(0, -q / c.queda1 * 100));
+    h += `<div class="lin"><span><b>${w.s}</b>${links(w.mint)} <span class="sub">${w.idade.toFixed(0)} dias · MC ${fmtU(w.mcap)} · liq ${fmtU(w.liq)} · ${[w.site ? 'site' : '', w.x ? 'X' : '', w.tg ? 'telegram' : ''].filter(Boolean).join(' ')}</span></span>
+      <span class="sub" style="min-width:220px;color:${perto ? COR.aviso : COR.neutro}">${q.toFixed(0)}% da máxima 24 h${S.pos[w.mint] ? ' · em posição' : ''}<div class="barra"><i style="width:${prog}%;background:${perto ? COR.aviso : '#374151'}"></i></div></span></div>`; });
+  if (c.esperaSinal > 0) { const SN = Object.entries(S.sinais || {});   // v4.10
+    h += `<div class="sec">⏳ SINAIS ESPERANDO CAIR MAIS ${c.esperaSinal}% — ${SN.length}</div>`;
+    if (!SN.length) h += `<div class="vazio">Nenhum sinal esperando.</div>`;
+    SN.forEach(([m, sn]) => { const w = M[m] || {}, alvoP = sn.px * (1 - c.esperaSinal / 100), falta = w.p ? (alvoP / w.p - 1) * 100 : null;
+      h += `<div class="lin"><span><b>${sn.s || w.s || m.slice(0, 6)}</b>${links(m)} <span class="sub">marcou ${fmtP(sn.px)} em ${hora(sn.t)} · compra a 1ª parte em ${fmtP(alvoP)}</span></span><span class="sub">${w.p ? 'agora ' + fmtP(w.p) + ' · falta ' + falta.toFixed(1) + '%' : ''}</span></div>`; }); }
+  h += `<div class="sec">🧾 ACONTECIMENTOS</div>`;
+  S.eventos.slice(0, 20).forEach(e => { h += `<div class="lin"><span style="color:${e.cor || COR.neutro}">${e.txt}${e.mint ? links(e.mint) : ''}</span><span class="sub">${hora(e.t)}</span></div>`; });
+  document.getElementById('corpo').innerHTML = h;
+}
+// ajustes / botões
+const ROT = { bancaBRL:'Banca (R$)', idadeMinDias:'Idade mín. (dias)', mcMin:'MC mín. (US$)', mcMax:'MC máx. (US$)', liqMin:'Liquidez mín. (US$)', exigeProjeto:'Exigir site/X/telegram (1/0)',
+  queda1:'1ª compra: queda da máx. 24 h (%)', queda2:'2ª compra (%)', queda3:'3ª compra (%)', queda4:'4ª compra (%)', parte1:'1ª parte (SOL)', parte2:'2ª parte (SOL)', parte3:'3ª parte (SOL)', parte4:'4ª parte (SOL)',
+  alvo:'Alvo sobre o investido (%)', stop:'Stop (%) — 0 = sem stop', tempoMaxH:'Tempo máx. (h)', liqFuga:'Sai se liquidez < (US$)', maxMoedas:'Máx. moedas abertas', esperaH:'Espera p/ reentrar (h)', esperaSinal:'Esperar cair mais após o sinal (%) — 0 = compra no sinal', esperaSinalH:'Sinal vale por (h)', volDesde:'Volume subindo p/ comprar a partir da parte (2/3/4, 0 = desligado)', volJanelaH:'Janela do volume (h)', prioridadeSOL:'Prioridade (SOL)', taxaRedeSOL:'Taxa da rede (SOL)', aluguelSOL:'Conta da moeda (SOL, volta)', atrasoExecMs:'Atraso da ordem (ms)' };
+function montaCfg(){ const el = document.getElementById('cfg');
+  el.innerHTML = Object.keys(ROT).map(k => `<label>${ROT[k]}<input data-k="${k}" type="number" step="any" value="${S.cfg[k]}"></label>`).join('') + `<div class="sub" style="margin-top:6px">Banca só vale ao zerar o teste. O resto vale na hora.</div>`;
+  el.querySelectorAll('input').forEach(i => i.onchange = () => { const v = parseFloat(i.value); if (isFinite(v)) { S.cfg[i.dataset.k] = v; ev(`Ajuste: ${ROT[i.dataset.k]} = ${v}`, COR.neutro); salvar(); desenha(); } }); }
+document.getElementById('bCfg').onclick = () => { const el = document.getElementById('cfg'); el.style.display = el.style.display === 'block' ? 'none' : 'block'; montaCfg(); };
+document.getElementById('bLiga').onclick = () => { S.ligado = !S.ligado; salvar(); desenha(); };
+document.getElementById('bZera').onclick = () => { if (!confirm('Zerar o teste? Apaga operações e posições.')) return; S = novo(S.cfg); cotacao(); salvar(); desenha(); };
+document.getElementById('bExp').onclick = () => {
+  const dados = { robo:'Robô Queda com Projeto — PAPEL v4.11', exportadoEm:new Date().toISOString(), testeDesde:new Date(S.inicio).toISOString(), cotacao:{ SOLBRL, SOLUSD }, solInicial:S.solInicial, saldoLivre:S.saldo,
+    ajustes:S.cfg, posicoesAbertas:Object.values(S.pos), operacoes:S.hist, resultadoPorDia:S.dias, acontecimentos:S.eventos,
+    vigiadas:Object.values(M).map(w => ({ s:w.s, mint:w.mint, idade:w.idade, mc:w.mcap, liq:w.liq, preco:w.p, max24:hiAtual(w), quedaPct:w.p && w.hi24 ? (w.p / hiAtual(w) - 1) * 100 : null })) };
+  const a = document.createElement('a'), d = new Date(); a.href = URL.createObjectURL(new Blob([JSON.stringify(dados, null, 1)], { type:'application/json' }));
+  a.download = `robo-queda-export-${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}-${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}.json`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
+cotacao(); desenha();
