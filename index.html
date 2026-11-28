@@ -396,6 +396,7 @@ function guardaSim(){ try { localStorage.setItem('painelSim', JSON.stringify(SIM
 const CORTE_V410 = 1795875300000;   // 28/11 11:15 — entradas a partir daqui já foram feitas pela regra nova (v4.10): ficam como são
 let MODO = (() => { try { return localStorage.getItem('painelModo') === 'sim' ? 'sim' : 'real'; } catch(e) { return 'real'; } })();
 const REG = (() => { try { return Object.assign({ espera:15, validade:72, vol:0 }, JSON.parse(localStorage.getItem('painelReg') || '{}')); } catch(e) { return { espera:15, validade:72, vol:0 }; } })();
+let simFalta = 0;
 let VELAS = (() => { try { return JSON.parse(localStorage.getItem('painelVelas') || '{}'); } catch(e) { return {}; } })(), baixando = '', baixandoAgora = false;
 function guardaReg(){ try { localStorage.setItem('painelReg', JSON.stringify(REG)); localStorage.setItem('painelModo', MODO); } catch(e) {} }
 function episodios(D){   // entradas reais do teste antes da regra nova: momento do sinal, preço do sinal e máxima de 24 h
@@ -405,16 +406,19 @@ async function baixaVelas(eps){   // velas de 15 min (GeckoTerminal) de cada moe
   if (baixandoAgora) return; baixandoAgora = true;
   try { const ms = [...new Set(eps.map(e => e.mint))], falta = ms.filter(m => !VELAS[m] || Date.now() - VELAS[m].t > 3600000);
     let i = 0;
-    for (const m of falta) { i++; baixando = `baixando velas para a simulação ${i}/${falta.length}…`; marcarNuvem();
-      try { let pool = VELAS[m] && VELAS[m].pool;
-        if (!pool) { const j = await (await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/tokens/${m}/pools?page=1`)).json(); await espera(2200);
-          const ps = (j.data || []).map(d => ({ a:d.attributes.address, l:+d.attributes.reserve_in_usd })).sort((a, b) => b.l - a.l); if (!ps.length) continue; pool = ps[0].a; }
-        const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/pools/${pool}/ohlcv/minute?aggregate=15&limit=1000&currency=usd&token=${m}`); await espera(2200);
-        if (r.status === 429) { await espera(20000); continue; }
-        const j = await r.json(), v = (j.data && j.data.attributes.ohlcv_list) || []; if (!v.length) continue;
-        VELAS[m] = { t:Date.now(), pool, k:v.map(x => [x[0] * 1000, +(+x[1]).toPrecision(5), +(+x[2]).toPrecision(5), +(+x[3]).toPrecision(5), +(+x[4]).toPrecision(5), Math.round(+x[5])]).sort((a, b) => a[0] - b[0]) };
-        try { localStorage.setItem('painelVelas', JSON.stringify(VELAS)); } catch(e) {}
-      } catch(e) {} }
+    for (const m of falta) { i++; let pool = VELAS[m] && VELAS[m].pool;
+      for (let tent = 0; tent < 4; tent++) { baixando = `baixando velas para a simulação ${i}/${falta.length}…`; marcarNuvem();
+        try {
+          if (!pool) { const rp = await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/tokens/${m}/pools?page=1`); await espera(2500);
+            if (!rp.ok) { await espera(rp.status === 429 ? 25000 : 3000); continue; }
+            const j = await rp.json(), ps = (j.data || []).map(d => ({ a:d.attributes.address, l:+d.attributes.reserve_in_usd })).sort((a, b) => b.l - a.l); if (!ps.length) break; pool = ps[0].a; }
+          const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/pools/${pool}/ohlcv/minute?aggregate=15&limit=1000&currency=usd&token=${m}`); await espera(2500);
+          if (!r.ok) { await espera(r.status === 429 ? 25000 : 3000); continue; }
+          const j = await r.json(), v = (j.data && j.data.attributes.ohlcv_list) || []; if (!v.length) break;
+          VELAS[m] = { t:Date.now(), pool, k:v.map(x => [x[0] * 1000, +(+x[1]).toPrecision(5), +(+x[2]).toPrecision(5), +(+x[3]).toPrecision(5), +(+x[4]).toPrecision(5), Math.round(+x[5])]).sort((a, b) => a[0] - b[0]) };
+          try { localStorage.setItem('painelVelas', JSON.stringify(VELAS)); } catch(e) {}
+          break;
+        } catch(e) { await espera(3000); } } }
   } finally { baixando = ''; baixandoAgora = false; } }
 function simula(eps){   // regra: sinal → espera cair mais REG.espera% → 1ª parte; 2ª/3ª/4ª nas quedas da máxima; alvo sobre o investido; tempo depois da 4ª
   const c = S.cfg, LOT = [c.parte1, c.parte2, c.parte3, c.parte4], QD = [c.queda1, c.queda2, c.queda3, c.queda4], f = c.prioridadeSOL + c.taxaRedeSOL, F = 0.01, U = SOLUSD || 1;
@@ -447,7 +451,7 @@ function aplicaModo(){
   if (MODO !== 'sim') return;
   const D = { hist:S.hist, pos:S.pos }, eps = episodios(D);
   baixaVelas(eps).then(() => { if (!ocupadoLaco) cicloPainel(); });
-  const r = simula(eps); if (r.semVelas >= eps.length) return;   // ainda sem velas: mostra o real até baixar
+  const r = simula(eps); simFalta = r.semVelas; if (r.semVelas > 0) return;   // faltam velas de alguma moeda: mostra o real até completar (tenta de novo a cada 1 min)
   const novosH = S.hist.filter(h => h.t0 >= CORTE_V410), novosP = Object.fromEntries(Object.entries(S.pos).filter(([k, p]) => p.t0 >= CORTE_V410));
   S.hist = novosH.concat(r.hist).sort((a, b) => b.t1 - a.t1); S.pos = Object.assign({}, r.pos, novosP);
   const hoje = diaBR(Date.now()), g = {};
@@ -469,7 +473,7 @@ function botoesModo(){ const el = document.getElementById('simReg'); if (!el) re
   el.querySelectorAll('button').forEach(b => b.style.cssText = b.dataset.modo === MODO ? 'background:#1d4ed8;border-color:#3b82f6;color:#fff;font-weight:600' : '');
   const a = document.activeElement && document.activeElement.id;
   if (a !== 'regEsp') document.getElementById('regEsp').value = REG.espera; if (a !== 'regVal') document.getElementById('regVal').value = REG.validade; if (a !== 'regVol') document.getElementById('regVol').value = REG.vol;
-  document.getElementById('regInfo').textContent = MODO === 'sim' ? (baixando || '· refaz as entradas de 20/11 até 28/11 11:15 pelas velas de 15 min (alvo, quedas, lotes e tempo vêm do robô; entradas depois disso ficam como são)') : '· mostrando o que o robô fez de verdade'; }
+  document.getElementById('regInfo').textContent = MODO === 'sim' ? (baixando || (simFalta ? `· faltam as velas de ${simFalta} entrada(s) — tenta de novo a cada 1 min (mostrando o real até completar)` : '') || '· refaz as entradas de 20/11 até 28/11 11:15 pelas velas de 15 min (alvo, quedas, lotes e tempo vêm do robô; entradas depois disso ficam como são)') : '· mostrando o que o robô fez de verdade'; }
 async function puxarNuvem(){
   try { const r = await fetch(URL_ESTADO + '?t=' + Date.now(), { cache:'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json(); if (!d.estado) throw new Error('sem estado');
@@ -486,7 +490,7 @@ async function cicloPainel(){ if (ocupadoLaco) return; ocupadoLaco = true;
   finally { ocupadoLaco = false; desenha(); desenhaCal(); mostraSim(''); marcarNuvem(); } }
 function marcarNuvem(){ const min = atualizadoNuvem ? (Date.now() - atualizadoNuvem) / 60000 : null;
   const cor = min == null ? COR.aviso : min > 20 ? COR.aviso : COR.info;
-  document.getElementById('status').innerHTML = `<span style="color:${cor}">☁ robô na nuvem</span> · estado salvo ${min == null ? '—' : 'há ' + min.toFixed(0) + ' min (' + hora(atualizadoNuvem) + ')'}${min != null && min > 20 ? ' · <b>atrasado</b> (o GitHub pode estar trocando de rodada)' : ''}${falhaNuvem ? ' · falha ao ler: ' + falhaNuvem : ''} · SOL ${SOLBRL ? fmtR(SOLBRL) : '—'} · teste desde ${S.inicio ? hora(S.inicio) : '—'}${lotesNuvem ? ' · lotes reais do robô: ' + lotesNuvem.map(x => x.toFixed(3)).join(' / ') + ' SOL, banca ' + (bancaNuvem || 0).toFixed(2) + ' SOL' : ''} · atualiza a cada 1 min${MODO === 'sim' ? ` · <b style="color:${COR.aviso}">MOSTRANDO SIMULADO (esperar ${REG.espera}%${REG.vol > 0 ? ', volume a partir da ' + REG.vol + 'ª' : ''}): fechadas e abertas refeitas pelas velas — o real continua guardado (botão Real)</b>` : ''}`; botoesModo(); }
+  document.getElementById('status').innerHTML = `<span style="color:${cor}">☁ robô na nuvem</span> · estado salvo ${min == null ? '—' : 'há ' + min.toFixed(0) + ' min (' + hora(atualizadoNuvem) + ')'}${min != null && min > 20 ? ' · <b>atrasado</b> (o GitHub pode estar trocando de rodada)' : ''}${falhaNuvem ? ' · falha ao ler: ' + falhaNuvem : ''} · SOL ${SOLBRL ? fmtR(SOLBRL) : '—'} · teste desde ${S.inicio ? hora(S.inicio) : '—'}${lotesNuvem ? ' · lotes reais do robô: ' + lotesNuvem.map(x => x.toFixed(3)).join(' / ') + ' SOL, banca ' + (bancaNuvem || 0).toFixed(2) + ' SOL' : ''} · atualiza a cada 1 min${MODO === 'sim' && !simFalta ? ` · <b style="color:${COR.aviso}">MOSTRANDO SIMULADO (esperar ${REG.espera}%${REG.vol > 0 ? ', volume a partir da ' + REG.vol + 'ª' : ''}): fechadas e abertas refeitas pelas velas — o real continua guardado (botão Real)</b>` : ''}`; botoesModo(); }
 setTimeout(() => { cicloPainel(); setInterval(cicloPainel, 60000); }, 50);
 
 // ---------------- tela ----------------
