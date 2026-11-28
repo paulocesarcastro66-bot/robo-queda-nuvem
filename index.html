@@ -404,7 +404,7 @@ function episodios(D){   // entradas reais do teste antes da regra nova: momento
     .map(x => ({ mint:x.mint, s:x.s, ts:x.t0, p0:x.partes[0].pPago, hi:x.hiRef })).sort((a, b) => a.ts - b.ts); }
 async function baixaVelas(eps){   // velas de 15 min (GeckoTerminal) de cada moeda do teste; guarda no navegador e renova a cada 1 h
   if (baixandoAgora) return; baixandoAgora = true;
-  try { const ms = [...new Set(eps.map(e => e.mint))], falta = ms.filter(m => !VELAS[m] || Date.now() - VELAS[m].t > 3600000);
+  try { const ms = [...new Set(eps.map(e => e.mint))], falta = ms.filter(m => !VELAS[m] || !VELAS[m].ok || Date.now() - VELAS[m].t > 3600000);
     let i = 0;
     for (const m of falta) { i++; let pool = VELAS[m] && VELAS[m].pool;
       for (let tent = 0; tent < 4; tent++) { baixando = `baixando velas para a simulação ${i}/${falta.length}…`; marcarNuvem();
@@ -415,7 +415,15 @@ async function baixaVelas(eps){   // velas de 15 min (GeckoTerminal) de cada moe
           const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/pools/${pool}/ohlcv/minute?aggregate=15&limit=1000&currency=usd&token=${m}`); await espera(2500);
           if (!r.ok) { await espera(r.status === 429 ? 25000 : 3000); continue; }
           const j = await r.json(), v = (j.data && j.data.attributes.ohlcv_list) || []; if (!v.length) break;
-          VELAS[m] = { t:Date.now(), pool, k:v.map(x => [x[0] * 1000, +(+x[1]).toPrecision(5), +(+x[2]).toPrecision(5), +(+x[3]).toPrecision(5), +(+x[4]).toPrecision(5), Math.round(+x[5])]).sort((a, b) => a[0] - b[0]) };
+          const conv = a => a.map(x => [x[0] * 1000, +(+x[1]).toPrecision(5), +(+x[2]).toPrecision(5), +(+x[3]).toPrecision(5), +(+x[4]).toPrecision(5), Math.round(+x[5])]);
+          let k = conv(v).sort((a, b) => a[0] - b[0]);
+          const precisa = Math.min(...eps.filter(e => e.mint === m).map(e => e.ts)) - 3600000;   // moeda com pouco negócio: volta mais páginas até cobrir a entrada
+          for (let pg = 0; pg < 4 && k.length && k[0][0] > precisa; pg++) {
+            const r2 = await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/pools/${pool}/ohlcv/minute?aggregate=15&limit=1000&currency=usd&token=${m}&before_timestamp=${Math.floor(k[0][0] / 1000)}`); await espera(2500);
+            if (!r2.ok) { if (r2.status === 429) { await espera(25000); pg--; continue; } break; }
+            const v2 = ((await r2.json()).data || {}).attributes; const a2 = (v2 && v2.ohlcv_list) || []; if (!a2.length) break;
+            k = conv(a2).filter(x => x[0] < k[0][0]).sort((a, b) => a[0] - b[0]).concat(k); }
+          VELAS[m] = { t:Date.now(), pool, k, ok:1 };
           try { localStorage.setItem('painelVelas', JSON.stringify(VELAS)); } catch(e) {}
           break;
         } catch(e) { await espera(3000); } } }
@@ -424,9 +432,10 @@ function simula(eps){   // regra: sinal → espera cair mais REG.espera% → 1ª
   const c = S.cfg, LOT = [c.parte1, c.parte2, c.parte3, c.parte4], QD = [c.queda1, c.queda2, c.queda3, c.queda4], f = c.prioridadeSOL + c.taxaRedeSOL, F = 0.01, U = SOLUSD || 1;
   const hist = [], pos = {}, livre = {}; let semVelas = 0;
   const vs = (K, i) => { let s = 0; for (let j = Math.max(0, i - 23); j <= i; j++) s += K[j][5]; return s; };
-  eps.forEach((e, n) => { const V = VELAS[e.mint]; if (!V || !V.k.length || V.k[0][0] > e.ts) { semVelas++; return; }
+    const semDados = [];
+  eps.forEach((e, n) => { const V = VELAS[e.mint]; if (!V || !V.k.length || V.k[0][0] > e.ts) { semVelas++; semDados.push(e.mint + ':' + e.ts); return; }
     if (livre[e.mint] && e.ts < livre[e.mint]) return;   // o robô não abre a mesma moeda duas vezes ao mesmo tempo
-    const K = V.k; let j = K.findIndex(k => k[0] + 900000 > e.ts); if (j < 0) { semVelas++; return; }
+    const K = V.k; let j = K.findIndex(k => k[0] + 900000 > e.ts); if (j < 0) { semVelas++; semDados.push(e.mint + ':' + e.ts); return; }
     const alvoEntrada = e.p0 * (1 - (REG.espera || 0) / 100), limite = REG.validade > 0 ? e.ts + REG.validade * 3600000 : Infinity;
     const partes = []; let tok = 0, custo = 0, t4 = 0, fim = null;
     const compra = (px, t) => { const k = partes.length, sol = LOT[k]; tok += sol * U * (1 - F) / px; custo += sol + f; partes.push({ parte:k + 1, t, sol, pPago:px, quedaPct:(px / e.hi - 1) * 100 }); if (k === 3) t4 = t; };
@@ -446,13 +455,14 @@ function simula(eps){   // regra: sinal → espera cair mais REG.espera% → 1ª
       hist.push({ s:e.s, mint:e.mint, t0:partes[0].t, t1:fim.t, horas:(fim.t - partes[0].t) / 3600000, motivo:fim.motivo + ' (simulado)', partes, custo, venda, res, pct:(venda / custo - 1) * 100, medio, pSaida:fim.px, hiRef:e.hi, brl:null }); }
     else { const w = M[e.mint], pNow = (w && w.p) || K[K.length - 1][4], valor = tok * pNow / U * (1 - F) - f; livre[e.mint] = Infinity;
       pos[e.mint + '#sim' + n] = { mint:e.mint, s:e.s, t0:partes[0].t, hiRef:e.hi, raw:0, tok, custo, partes, dec:0, aluguel:c.aluguelSOL || 0, medio, valor, pct:(valor / custo - 1) * 100, tV:Date.now() }; } });
-  return { hist, pos, semVelas }; }
+  return { hist, pos, semVelas, semDados }; }
 function aplicaModo(){
   if (MODO !== 'sim') return;
   const D = { hist:S.hist, pos:S.pos }, eps = episodios(D);
   baixaVelas(eps).then(() => { if (!ocupadoLaco) cicloPainel(); });
-  const r = simula(eps); simFalta = r.semVelas; if (r.semVelas > 0) return;   // faltam velas de alguma moeda: mostra o real até completar (tenta de novo a cada 1 min)
-  const novosH = S.hist.filter(h => h.t0 >= CORTE_V410), novosP = Object.fromEntries(Object.entries(S.pos).filter(([k, p]) => p.t0 >= CORTE_V410));
+  const r = simula(eps); simFalta = r.semVelas; if (r.semVelas >= eps.length) return;   // ainda sem velas: mostra o real
+  const fica = x => x.t0 >= CORTE_V410 || r.semDados.includes(x.mint + ':' + x.t0);   // entradas da regra nova e as sem velas ficam como o real
+  const novosH = S.hist.filter(fica), novosP = Object.fromEntries(Object.entries(S.pos).filter(([k, p]) => fica(p)));
   S.hist = novosH.concat(r.hist).sort((a, b) => b.t1 - a.t1); S.pos = Object.assign({}, r.pos, novosP);
   const hoje = diaBR(Date.now()), g = {};
   for (const h of S.hist) { const k = diaBR(h.t1); if (k === hoje) continue; const o = g[k] || (g[k] = { dia:k, t:h.t1, ops:0, ganhos:0, res:0 }); o.ops++; if (h.res > 0) o.ganhos++; o.res += h.res; }
@@ -473,7 +483,7 @@ function botoesModo(){ const el = document.getElementById('simReg'); if (!el) re
   el.querySelectorAll('button').forEach(b => b.style.cssText = b.dataset.modo === MODO ? 'background:#1d4ed8;border-color:#3b82f6;color:#fff;font-weight:600' : '');
   const a = document.activeElement && document.activeElement.id;
   if (a !== 'regEsp') document.getElementById('regEsp').value = REG.espera; if (a !== 'regVal') document.getElementById('regVal').value = REG.validade; if (a !== 'regVol') document.getElementById('regVol').value = REG.vol;
-  document.getElementById('regInfo').textContent = MODO === 'sim' ? (baixando || (simFalta ? `· faltam as velas de ${simFalta} entrada(s) — tenta de novo a cada 1 min (mostrando o real até completar)` : '') || '· refaz as entradas de 20/11 até 28/11 11:15 pelas velas de 15 min (alvo, quedas, lotes e tempo vêm do robô; entradas depois disso ficam como são)') : '· mostrando o que o robô fez de verdade'; }
+  document.getElementById('regInfo').textContent = MODO === 'sim' ? (baixando || (simFalta ? `· ${simFalta} entrada(s) ainda sem velas ficam como o real (tenta baixar de novo a cada 1 min)` : '') || '· refaz as entradas de 20/11 até 28/11 11:15 pelas velas de 15 min (alvo, quedas, lotes e tempo vêm do robô; entradas depois disso ficam como são)') : '· mostrando o que o robô fez de verdade'; }
 async function puxarNuvem(){
   try { const r = await fetch(URL_ESTADO + '?t=' + Date.now(), { cache:'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json(); if (!d.estado) throw new Error('sem estado');
@@ -490,7 +500,7 @@ async function cicloPainel(){ if (ocupadoLaco) return; ocupadoLaco = true;
   finally { ocupadoLaco = false; desenha(); desenhaCal(); mostraSim(''); marcarNuvem(); } }
 function marcarNuvem(){ const min = atualizadoNuvem ? (Date.now() - atualizadoNuvem) / 60000 : null;
   const cor = min == null ? COR.aviso : min > 20 ? COR.aviso : COR.info;
-  document.getElementById('status').innerHTML = `<span style="color:${cor}">☁ robô na nuvem</span> · estado salvo ${min == null ? '—' : 'há ' + min.toFixed(0) + ' min (' + hora(atualizadoNuvem) + ')'}${min != null && min > 20 ? ' · <b>atrasado</b> (o GitHub pode estar trocando de rodada)' : ''}${falhaNuvem ? ' · falha ao ler: ' + falhaNuvem : ''} · SOL ${SOLBRL ? fmtR(SOLBRL) : '—'} · teste desde ${S.inicio ? hora(S.inicio) : '—'}${lotesNuvem ? ' · lotes reais do robô: ' + lotesNuvem.map(x => x.toFixed(3)).join(' / ') + ' SOL, banca ' + (bancaNuvem || 0).toFixed(2) + ' SOL' : ''} · atualiza a cada 1 min${MODO === 'sim' && !simFalta ? ` · <b style="color:${COR.aviso}">MOSTRANDO SIMULADO (esperar ${REG.espera}%${REG.vol > 0 ? ', volume a partir da ' + REG.vol + 'ª' : ''}): fechadas e abertas refeitas pelas velas — o real continua guardado (botão Real)</b>` : ''}`; botoesModo(); }
+  document.getElementById('status').innerHTML = `<span style="color:${cor}">☁ robô na nuvem</span> · estado salvo ${min == null ? '—' : 'há ' + min.toFixed(0) + ' min (' + hora(atualizadoNuvem) + ')'}${min != null && min > 20 ? ' · <b>atrasado</b> (o GitHub pode estar trocando de rodada)' : ''}${falhaNuvem ? ' · falha ao ler: ' + falhaNuvem : ''} · SOL ${SOLBRL ? fmtR(SOLBRL) : '—'} · teste desde ${S.inicio ? hora(S.inicio) : '—'}${lotesNuvem ? ' · lotes reais do robô: ' + lotesNuvem.map(x => x.toFixed(3)).join(' / ') + ' SOL, banca ' + (bancaNuvem || 0).toFixed(2) + ' SOL' : ''} · atualiza a cada 1 min${MODO === 'sim' ? ` · <b style="color:${COR.aviso}">MOSTRANDO SIMULADO (esperar ${REG.espera}%${REG.vol > 0 ? ', volume a partir da ' + REG.vol + 'ª' : ''}): fechadas e abertas refeitas pelas velas — o real continua guardado (botão Real)</b>` : ''}`; botoesModo(); }
 setTimeout(() => { cicloPainel(); setInterval(cicloPainel, 60000); }, 50);
 
 // ---------------- tela ----------------
