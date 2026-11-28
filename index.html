@@ -484,6 +484,12 @@ function botoesModo(){ const el = document.getElementById('simReg'); if (!el) re
   const a = document.activeElement && document.activeElement.id;
   if (a !== 'regEsp') document.getElementById('regEsp').value = REG.espera; if (a !== 'regVal') document.getElementById('regVal').value = REG.validade; if (a !== 'regVol') document.getElementById('regVol').value = REG.vol;
   document.getElementById('regInfo').textContent = MODO === 'sim' ? (baixando || (simFalta ? `· ${simFalta} entrada(s) ainda sem velas ficam como o real (tenta baixar de novo a cada 1 min)` : '') || '· refaz as entradas de 20/11 até 28/11 11:15 pelas velas de 15 min (alvo, quedas, lotes e tempo vêm do robô; entradas depois disso ficam como são)') : '· mostrando o que o robô fez de verdade'; }
+function aplicaSim(){
+  S.simAuto = SIM.auto !== false;
+  if (SIM.p1 > 0 && Math.abs(SIM.p1 - S.cfg.parte1) > 1e-9) simP1(SIM.p1);          // já ajusta a banca se "acompanha a margem"
+  else if (S.simAuto && SIM.p1 > 0) bancaAuto();
+  if (!S.simAuto && SIM.banca > 0) simBanca(SIM.banca);
+}
 async function puxarNuvem(){
   try { const r = await fetch(URL_ESTADO + '?t=' + Date.now(), { cache:'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json(); if (!d.estado) throw new Error('sem estado');
