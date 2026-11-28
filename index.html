@@ -97,6 +97,8 @@ const PADRAO = {
   tempoMaxH: 72,        // v4.8: só depois das 4 partes — vende tudo X horas após a 4ª parte
   esperaSinal: 15,      // v4.10: no sinal (queda1) só MARCA o preço; compra a 1ª parte se cair mais X% a partir dali (0 = compra no sinal)
   esperaSinalH: 72,     // v4.10: o sinal vale por X horas; se não cair mais nesse tempo, é cancelado (0 = não vence)
+  volDesde: 2,          // v4.11: a partir de qual parte o preço médio só entra com volume subindo (últimas X h MAIOR que as X h anteriores); 2 = 2ª/3ª/4ª, 4 = só a 4ª, 0 = desligado
+  volJanelaH: 6,        // v4.11: janela do volume em horas (1 a 12)
   liqFuga: 10000,       // se a liquidez cair abaixo de US$ X, vende (sinal de puxada de liquidez)
   maxMoedas: 10,        // moedas abertas ao mesmo tempo
   esperaH: 6,           // depois de fechar uma moeda, espera X horas para entrar nela de novo
@@ -240,6 +242,8 @@ async function maxima24(){
     w.falhasHi = (w.falhasHi || 0) + 1; w.hi24 = 0; w.tHi = Date.now(); w.pool = null;
     if (w.falhasHi >= 2) { w.ruim = true; ev(`${w.s}: preço das velas não bate com a Jupiter — moeda ignorada (evita erro de máxima)`, COR.aviso, w.mint); }
     return; }
+  const J = Math.max(1, Math.min(12, Math.round(S.cfg.volJanelaH || 6)));   // v4.11: volume das velas de 1 h fechadas (últimas J h × J h anteriores)
+  w.volA = v.slice(1, 1 + J).reduce((s, k) => s + (+k[5] || 0), 0); w.volB = v.slice(1 + J, 1 + 2 * J).reduce((s, k) => s + (+k[5] || 0), 0); w.tVol = Date.now();
   w.falhasHi = 0; w.hi24 = hi; w.lo24 = Math.min(...v.slice(0, 24).map(k => +k[3])); w.tHi = Date.now(); w.hiVivo = 0;
 }
 const hiAtual = w => Math.max(w.hi24 || 0, w.hiVivo || 0);
@@ -325,9 +329,16 @@ async function avaliar(){
     const p = S.pos[w.mint];
     if (p) {   // já tem posição: compra as próximas partes se continuar caindo (referência = máxima da 1ª compra)
       const n = p.partes.length, q = (w.p / p.hiRef - 1) * 100;
-      if (n === 1 && q <= -c.queda2) await comprar(w, 2, c.parte2);
-      else if (n === 2 && q <= -c.queda3) await comprar(w, 3, c.parte3);
-      else if (n === 3 && q <= -c.queda4) await comprar(w, 4, c.parte4);
+      const qs = [0, c.queda2, c.queda3, c.queda4], ps = [0, c.parte2, c.parte3, c.parte4];
+      if (n >= 1 && n <= 3 && q <= -qs[n]) {
+        if (c.volDesde > 0 && n + 1 >= c.volDesde) {   // v4.11: essa parte só entra se o volume estiver subindo (tem comprador); volume caindo = segura
+          const temVol = w.tVol && Date.now() - w.tVol < 3 * 3600000;
+          if (!temVol || !(w.volA > w.volB)) {
+            if (p.segurou !== n + 1) { p.segurou = n + 1; ev(`SEGUROU a ${n + 1}ª parte de ${w.s}: bateu −${qs[n]}% mas ${temVol ? `o volume está caindo (últimas ${c.volJanelaH} h ${fmtU(w.volA)} × anteriores ${fmtU(w.volB)})` : 'ainda sem o volume das velas'} — compra quando o volume subir`, COR.neutro, w.mint); salvar(); }
+            continue; }
+        }
+        await comprar(w, n + 1, ps[n]);
+      }
       continue;
     }
     if (!w.passa || w.ruim) continue;
@@ -458,7 +469,7 @@ function desenha(){
       if (n >= 4) rec = `<span class="sub">todas as 4 partes usadas</span>`;
       else { const alvoP = p.hiRef * (1 - quedasCfg[n] / 100), falta = w.p ? (alvoP / w.p - 1) * 100 : null;
         const tokNovo = partesCfg[n] * SOLUSD / alvoP, medioNovo = (p.custo * SOLUSD + partesCfg[n] * SOLUSD) / (p.tok + tokNovo);
-        rec = `<span class="rec">${n + 1}ª parte: ${partesCfg[n].toFixed(2)} SOL</span> a ${fmtP(alvoP)} (−${quedasCfg[n]}% da máx.)<br><span class="sub">${falta != null ? 'falta ' + falta.toFixed(1) + '% · ' : ''}médio iria de ${fmtP(p.medio)} → ${fmtP(medioNovo)} (${((medioNovo / p.medio - 1) * 100).toFixed(1)}%)</span>`; }
+        rec = `<span class="rec">${n + 1}ª parte: ${partesCfg[n].toFixed(2)} SOL</span> a ${fmtP(alvoP)} (−${quedasCfg[n]}% da máx.)<br><span class="sub">${falta != null ? 'falta ' + falta.toFixed(1) + '% · ' : ''}médio iria de ${fmtP(p.medio)} → ${fmtP(medioNovo)} (${((medioNovo / p.medio - 1) * 100).toFixed(1)}%)</span>${c.volDesde > 0 && n + 1 >= c.volDesde ? '<br><span class="sub">volume ' + c.volJanelaH + ' h: ' + (w.tVol ? (w.volA > w.volB ? '<b style="color:' + COR.info + '">subindo — pode fazer o médio</b>' : '<b style="color:' + COR.aviso + '">caindo — segura o preço médio</b>') + ' (' + fmtU(w.volA || 0) + ' × ' + fmtU(w.volB || 0) + ')' : 'aguardando as velas') + '</span>' : ''}`; }
       h += `<tr><td><b>${p.s}</b><br>${links(p.mint)}<br><span class="sub">MC ${w.mcap ? fmtU(w.mcap) : '—'}</span></td>
         <td>${tags}</td>
         <td class="n"><b>${p.custo.toFixed(2)} SOL</b><br><span class="sub">${n} de 4 partes</span></td>
@@ -608,7 +619,7 @@ setTimeout(() => mostraSim(''), 300);
 // ajustes / botões
 const ROT = { bancaBRL:'Banca (R$)', idadeMinDias:'Idade mín. (dias)', mcMin:'MC mín. (US$)', mcMax:'MC máx. (US$)', liqMin:'Liquidez mín. (US$)', exigeProjeto:'Exigir site/X/telegram (1/0)',
   queda1:'1ª compra: queda da máx. 24 h (%)', queda2:'2ª compra (%)', queda3:'3ª compra (%)', queda4:'4ª compra (%)', parte1:'1ª parte (SOL)', parte2:'2ª parte (SOL)', parte3:'3ª parte (SOL)', parte4:'4ª parte (SOL)',
-  alvo:'Alvo sobre o investido (%)', stop:'Stop (%) — 0 = sem stop', tempoMaxH:'Tempo máx. (h)', liqFuga:'Sai se liquidez < (US$)', maxMoedas:'Máx. moedas abertas', esperaH:'Espera p/ reentrar (h)', esperaSinal:'Esperar cair mais após o sinal (%) — 0 = compra no sinal', esperaSinalH:'Sinal vale por (h)', prioridadeSOL:'Prioridade (SOL)', taxaRedeSOL:'Taxa da rede (SOL)', aluguelSOL:'Conta da moeda (SOL, volta)', atrasoExecMs:'Atraso da ordem (ms)' };
+  alvo:'Alvo sobre o investido (%)', stop:'Stop (%) — 0 = sem stop', tempoMaxH:'Tempo máx. (h)', liqFuga:'Sai se liquidez < (US$)', maxMoedas:'Máx. moedas abertas', esperaH:'Espera p/ reentrar (h)', esperaSinal:'Esperar cair mais após o sinal (%) — 0 = compra no sinal', esperaSinalH:'Sinal vale por (h)', volDesde:'Volume subindo p/ comprar a partir da parte (2/3/4, 0 = desligado)', volJanelaH:'Janela do volume (h)', prioridadeSOL:'Prioridade (SOL)', taxaRedeSOL:'Taxa da rede (SOL)', aluguelSOL:'Conta da moeda (SOL, volta)', atrasoExecMs:'Atraso da ordem (ms)' };
 const AUTO = { parte2:1, parte3:1, parte4:1 };   // seguem a 1ª parte sozinhas
 function valorCfg(k){ if (k === 'bancaBRL') return SOLBRL && S.solInicial ? Math.round(S.solInicial * SOLBRL) : S.cfg.bancaBRL; return S.cfg[k]; }
 function montaCfg(){ const el = document.getElementById('cfg');
