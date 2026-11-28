@@ -95,6 +95,8 @@ const PADRAO = {
   alvo: 15,             // vende tudo quando o valor de venda (real) estiver +X% sobre o total investido
   stop: 0,              // 0 = sem stop (como ela). >0 = vende se ficar −X% sobre o investido
   tempoMaxH: 72,        // v4.8: só depois das 4 partes — vende tudo X horas após a 4ª parte
+  esperaSinal: 15,      // v4.10: no sinal (queda1) só MARCA o preço; compra a 1ª parte se cair mais X% a partir dali (0 = compra no sinal)
+  esperaSinalH: 72,     // v4.10: o sinal vale por X horas; se não cair mais nesse tempo, é cancelado (0 = não vence)
   liqFuga: 10000,       // se a liquidez cair abaixo de US$ X, vende (sinal de puxada de liquidez)
   maxMoedas: 10,        // moedas abertas ao mesmo tempo
   esperaH: 6,           // depois de fechar uma moeda, espera X horas para entrar nela de novo
@@ -332,7 +334,21 @@ async function avaliar(){
     if (Object.keys(S.pos).length >= c.maxMoedas) continue;
     if (S.ult[w.mint] && Date.now() - S.ult[w.mint] < c.esperaH * 3600000) continue;
     const q = (w.p / hiAtual(w) - 1) * 100;
-    if (q <= -c.queda1 && q >= -85) await comprar(w, 1, c.parte1);   // abaixo de −85% é dado errado ou moeda morrendo: não entra
+    if (!(c.esperaSinal > 0)) { if (q <= -c.queda1 && q >= -85) await comprar(w, 1, c.parte1); continue; }   // abaixo de −85% é dado errado ou moeda morrendo: não entra
+    // v4.10: o sinal só marca o preço; a 1ª parte entra se cair mais esperaSinal% a partir do preço marcado
+    S.sinais = S.sinais || {};
+    const sn = S.sinais[w.mint];
+    if (sn) {
+      if (c.esperaSinalH > 0 && Date.now() - sn.t > c.esperaSinalH * 3600000) { delete S.sinais[w.mint]; ev(`SINAL vencido em ${w.s}: não caiu mais ${c.esperaSinal}% em ${c.esperaSinalH} h`, COR.neutro, w.mint); continue; }
+      if (w.p <= sn.px * (1 - c.esperaSinal / 100) && (w.p / sn.hi - 1) * 100 >= -85) {
+        const hi = sn.hi; delete S.sinais[w.mint];
+        await comprar(w, 1, c.parte1);
+        if (S.pos[w.mint] && S.pos[w.mint].partes.length === 1) S.pos[w.mint].hiRef = hi;   // próximas partes contam da máxima do sinal
+      }
+      continue;
+    }
+    if (q <= -c.queda1 && q >= -85) { S.sinais[w.mint] = { t:Date.now(), px:w.p, hi:hiAtual(w), s:w.s };
+      ev(`SINAL em ${w.s}: caiu ${(-q).toFixed(0)}% da máxima — marcou ${fmtP(w.p)}; compra a 1ª parte se cair mais ${c.esperaSinal}% (${fmtP(w.p * (1 - c.esperaSinal / 100))})`, COR.neutro, w.mint); }
   }
 }
 let conferindo = false;
@@ -477,6 +493,11 @@ function desenha(){
   ord.forEach(({ w, q }) => { const perto = q <= -c.queda1 * 0.75, prog = Math.min(100, Math.max(0, -q / c.queda1 * 100));
     h += `<div class="lin"><span><b>${w.s}</b>${links(w.mint)} <span class="sub">${w.idade.toFixed(0)} dias · MC ${fmtU(w.mcap)} · liq ${fmtU(w.liq)} · ${[w.site ? 'site' : '', w.x ? 'X' : '', w.tg ? 'telegram' : ''].filter(Boolean).join(' ')}</span></span>
       <span class="sub" style="min-width:220px;color:${perto ? COR.aviso : COR.neutro}">${q.toFixed(0)}% da máxima 24 h${S.pos[w.mint] ? ' · em posição' : ''}<div class="barra"><i style="width:${prog}%;background:${perto ? COR.aviso : '#374151'}"></i></div></span></div>`; });
+  if (c.esperaSinal > 0) { const SN = Object.entries(S.sinais || {});   // v4.10
+    h += `<div class="sec">⏳ SINAIS ESPERANDO CAIR MAIS ${c.esperaSinal}% — ${SN.length}</div>`;
+    if (!SN.length) h += `<div class="vazio">Nenhum sinal esperando.</div>`;
+    SN.forEach(([m, sn]) => { const w = M[m] || {}, alvoP = sn.px * (1 - c.esperaSinal / 100), falta = w.p ? (alvoP / w.p - 1) * 100 : null;
+      h += `<div class="lin"><span><b>${sn.s || w.s || m.slice(0, 6)}</b>${links(m)} <span class="sub">marcou ${fmtP(sn.px)} em ${hora(sn.t)} · compra a 1ª parte em ${fmtP(alvoP)}</span></span><span class="sub">${w.p ? 'agora ' + fmtP(w.p) + ' · falta ' + falta.toFixed(1) + '%' : ''}</span></div>`; }); }
   h += `<div class="sec">🧾 ACONTECIMENTOS</div>`;
   S.eventos.slice(0, 20).forEach(e => { h += `<div class="lin"><span style="color:${e.cor || COR.neutro}">${e.txt}${e.mint ? links(e.mint) : ''}</span><span class="sub">${hora(e.t)}</span></div>`; });
   document.getElementById('corpo').innerHTML = h;
@@ -587,7 +608,7 @@ setTimeout(() => mostraSim(''), 300);
 // ajustes / botões
 const ROT = { bancaBRL:'Banca (R$)', idadeMinDias:'Idade mín. (dias)', mcMin:'MC mín. (US$)', mcMax:'MC máx. (US$)', liqMin:'Liquidez mín. (US$)', exigeProjeto:'Exigir site/X/telegram (1/0)',
   queda1:'1ª compra: queda da máx. 24 h (%)', queda2:'2ª compra (%)', queda3:'3ª compra (%)', queda4:'4ª compra (%)', parte1:'1ª parte (SOL)', parte2:'2ª parte (SOL)', parte3:'3ª parte (SOL)', parte4:'4ª parte (SOL)',
-  alvo:'Alvo sobre o investido (%)', stop:'Stop (%) — 0 = sem stop', tempoMaxH:'Tempo máx. (h)', liqFuga:'Sai se liquidez < (US$)', maxMoedas:'Máx. moedas abertas', esperaH:'Espera p/ reentrar (h)', prioridadeSOL:'Prioridade (SOL)', taxaRedeSOL:'Taxa da rede (SOL)', aluguelSOL:'Conta da moeda (SOL, volta)', atrasoExecMs:'Atraso da ordem (ms)' };
+  alvo:'Alvo sobre o investido (%)', stop:'Stop (%) — 0 = sem stop', tempoMaxH:'Tempo máx. (h)', liqFuga:'Sai se liquidez < (US$)', maxMoedas:'Máx. moedas abertas', esperaH:'Espera p/ reentrar (h)', esperaSinal:'Esperar cair mais após o sinal (%) — 0 = compra no sinal', esperaSinalH:'Sinal vale por (h)', prioridadeSOL:'Prioridade (SOL)', taxaRedeSOL:'Taxa da rede (SOL)', aluguelSOL:'Conta da moeda (SOL, volta)', atrasoExecMs:'Atraso da ordem (ms)' };
 const AUTO = { parte2:1, parte3:1, parte4:1 };   // seguem a 1ª parte sozinhas
 function valorCfg(k){ if (k === 'bancaBRL') return SOLBRL && S.solInicial ? Math.round(S.solInicial * SOLBRL) : S.cfg.bancaBRL; return S.cfg[k]; }
 function montaCfg(){ const el = document.getElementById('cfg');
